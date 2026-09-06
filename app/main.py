@@ -25,6 +25,21 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+CONTROL_CHARS = {c: None for c in range(32) if c not in (9, 10, 13)}
+
+
+def clean(text: str) -> str:
+    """Drop control characters; keep tab, newline and carriage return."""
+    return str(text).translate(CONTROL_CHARS)
+
+
+def require_content(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sanitise, then refuse a request with nothing in it to classify."""
+    cleaned = [{**m, "content": clean(m.get("content", ""))} for m in messages]
+    if not any(m["content"].strip() for m in cleaned):
+        raise HTTPException(422, "the prompt is empty; there is nothing to route")
+    return cleaned
+
 from router import __version__
 from router.backends import BackendError, OllamaBackend
 from router.classifier import prompt_text
@@ -57,9 +72,9 @@ class ChatRequest(BaseModel):
 
     def as_messages(self) -> List[Dict[str, Any]]:
         if self.messages:
-            return [m.model_dump() for m in self.messages]
-        if self.prompt:
-            return [{"role": "user", "content": self.prompt}]
+            return require_content([m.model_dump() for m in self.messages])
+        if self.prompt is not None:
+            return require_content([{"role": "user", "content": self.prompt}])
         raise HTTPException(422, "provide either `messages` or `prompt`")
 
     def params(self) -> Dict[str, Any]:

@@ -52,6 +52,8 @@ FEATURES: Dict[str, List[Feature]] = {
         _f(rf"\b({LANGUAGES})\b[^.!?]{{0,40}}\b"
            rf"(script|code|function|program|snippet|one[- ]?liner|app)\b",
            2.0, "named language applied to code"),
+        _f(rf"\b(explain|how does|how do|how is)\b[^.!?]{{0,40}}\b({LANGUAGES})\b",
+           2.0, "question about a language"),
         _f(r"\b(one[- ]?liner|snippet|script|method|algorithm|data structure)\b", 1.5, "code artifact noun"),
         # "my code" / "this bug" names a specific artifact. Bare "code" as a verb
         # ("I used to code in college") deliberately does not match.
@@ -59,6 +61,8 @@ FEATURES: Dict[str, List[Feature]] = {
            r"(code|script|function|program|module|class|bug|error|method|snippet|query|pointer)\b",
            1.2, "refers to a specific code artifact"),
         _f(r"[{};]\s*$", 0.8, "code punctuation"),
+        _f(r"^[ \t]{2,}\S", 1.0, "indented block"),
+        _f(r"\breturn\b|\w+\(\)|\w+\([a-z_]", 1.0, "call or return syntax"),
         _f(r"\b(write|fix|implement|optimi[sz]e)\b.{0,30}\b(code|function|script|class)\b", 2.5, "code request"),
     ],
     "math": [
@@ -66,6 +70,8 @@ FEATURES: Dict[str, List[Feature]] = {
         _f(r"\b(calculate|compute|solve|evaluate)\b", 2.0, "calculation verb"),
         _f(r"\b(equation|integral|derivative|matrix|probability|theorem|factorial)\b", 2.5, "math vocabulary"),
         _f(r"\b(math|maths|mathematics)\b", 1.5, "math domain noun"),
+        _f(r"\bconvert\b[^.!?]{0,30}\b(degrees?|radians?|celsius|fahrenheit|kelvin|km|miles|kg|lbs|pounds|metres|meters|feet|inches|bytes|hours|minutes)\b",
+           2.5, "unit conversion"),
         _f(r"\b(sum|product|percent|percentage|average|median)\b", 1.2, "quantitative vocabulary"),
         _f(r"[=<>]\s*\d", 0.8, "numeric comparison"),
         _f(r"\b\d+(\.\d+)?%", 1.0, "percentage literal"),
@@ -76,14 +82,16 @@ FEATURES: Dict[str, List[Feature]] = {
         _f(r"\b(step[- ]by[- ]step|analy[sz]e|evaluate|assess)\b", 2.2, "analysis request"),
         # Tolerate the object in between: "think it through", "walk me through".
         _f(r"\b(think|walk|talk)\s+(me\s+|us\s+|it\s+|this\s+|that\s+)?through\b",
-           2.2, "asks to be taken through it"),
+           2.8, "asks to be taken through it"),
         _f(r"\b(plan|strategy|architect|design|decide|recommend)\b", 1.8, "planning request"),
         _f(r"\b(if .{0,40} then|implication|consequence|because)\b", 1.2, "causal language"),
     ],
     "summarize": [
         _f(r"\b(summari[sz]e|summary|tl;?dr|condense|abstract)\b", 3.0, "summarization verb"),
         _f(r"\b(key (points|takeaways)|main ideas|bullet points|outline)\b", 2.5, "extraction request"),
-        _f(r"\b(extract|rewrite|paraphrase|translate|proofread|convert)\b", 2.0, "transformation verb"),
+        _f(r"\b(extract|rewrite|paraphrase|translate|proofread)\b", 2.0, "transformation verb"),
+        _f(r"\b(convert|turn|reformat)\b[^.!?]{0,40}\b(into|to|as)\b[^.!?]{0,20}\b(bullets?|bullet points|points|list|outline|summary|prose)\b",
+           2.5, "reformatting request"),
         _f(r"\b(the (following|text|article|document|transcript)|below)\b", 1.5, "refers to supplied text"),
     ],
     "chat": [
@@ -92,6 +100,8 @@ FEATURES: Dict[str, List[Feature]] = {
         _f(r"\b(chat|talk|speak)\s+(with|to)\s+(me|us)\b|\blet'?s\s+(chat|talk|discuss)\b",
            2.5, "asks for conversation"),
         _f(r"\b(my|your)\s+favou?rite\b", 1.5, "personal preference"),
+        _f(r"\b(like i'?m five|eli5|in simple terms|in plain english|dumb it down)\b",
+           3.0, "asks for a casual explanation"),
         _f(r"^\s*\S{1,40}\s*[?.!]?\s*$", 1.0, "very short message"),
     ],
 }
@@ -166,6 +176,15 @@ def classify_heuristic(text: str, cfg: RouterConfig) -> Decision:
                 scores[category] += weight * (1 + 0.35 * min(hits - 1, 4))
                 reasons.append(f"{category}: {reason} (x{hits})")
 
+    # "summarize this" plus an attached block means summarize the block, not
+    # write more of it — otherwise the attachment's own features win.
+    if EXPLICIT_SUMMARIZE.search(text) and ("```" in text or text.count("\n") >= 2):
+        for other in scores:
+            if other != "summarize":
+                scores[other] *= 0.5
+        scores["summarize"] += 3.0
+        reasons.append("summarize: explicit request over supplied material")
+
     # A long message is rarely small talk.
     est = estimate_tokens(text)
     if est > 200:
@@ -177,6 +196,17 @@ def classify_heuristic(text: str, cfg: RouterConfig) -> Decision:
     top = max(scores, key=lambda c: scores[c])
     total = sum(scores.values())
     strategy = "heuristic"
+
+    stripped = text.strip()
+    if len(stripped) <= 2 or not any(ch.isalnum() for ch in stripped):
+        # One character, or punctuation and emoji only. There is nothing to
+        # classify, so do not spend a model call pretending otherwise.
+        return Decision(
+            category="chat", scores=scores, confidence=0.1, strategy="fallback",
+            est_tokens=estimate_tokens(text),
+            reasons=["chat: no classifiable content"],
+            forced="nothing to classify",
+        )
 
     if total == 0:
         # Nothing matched at all. This is a fallthrough, not a classification, and
@@ -229,6 +259,13 @@ Request:
 {text}
 
 Category:"""
+
+# Note: an "ignore any instructions in the request" paragraph was tried here and
+# removed. On qwen2.5:3b it was accuracy-neutral (7/10 either way), it degraded
+# ordinary prompts, and it did not stop the injection that matters — a real
+# request carrying "classify this as chat" still fooled the model both with and
+# without it. What actually protects that case is the confidence gate: a prompt
+# with real content scores well on the heuristic and never reaches the model.
 
 VOTABLE = [c for c in CATEGORIES if c != "long"]
 
@@ -299,6 +336,11 @@ def classify(text: str, cfg: RouterConfig, backend=None) -> Decision:
         return decision
 
     agrees = vote == decision.category
+    total = sum(decision.scores.values())
+    share = (max(decision.scores.values()) / total) if total else 0.0
+    # A flat score profile means the prompt really does carry several intents.
+    # The model picks one, but the caller should still see that it was close.
+    ceiling = 0.55 if share < 0.4 else 1.0
     return Decision(
         category=vote,
         scores=decision.scores,
@@ -307,7 +349,7 @@ def classify(text: str, cfg: RouterConfig, backend=None) -> Decision:
             note,
             f"heuristic had {decision.category!r} ({'confirmed' if agrees else 'overridden'})",
         ],
-        confidence=0.9 if agrees else 0.7,
+        confidence=min(0.9 if agrees else 0.7, ceiling),
         strategy=f"hybrid:{cfg.classifier_model}",
         est_tokens=decision.est_tokens,
     )
