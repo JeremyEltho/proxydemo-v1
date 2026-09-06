@@ -21,6 +21,9 @@ jobs:
       - name: Engine tests (no dependencies)
         run: python test_router.py
 
+      - name: Tokenomics tests (no dependencies)
+        run: python test_tokenomics.py
+
       - name: API tests
         run: python test_api.py
 

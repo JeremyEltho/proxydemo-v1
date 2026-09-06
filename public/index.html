@@ -424,12 +424,14 @@ function render(d) {
   patchTo(cat, also);
 
   $('#stamp').textContent = d.routing_ms != null ? `decided in ${d.routing_ms} ms` : '';
+  const tok = d.tokenomics;
   $('#readout').innerHTML = [
     ['line', cat],
     ['model', d.selected_model],
     ['confidence', (dec.confidence * 100).toFixed(0) + '%'],
     ['read by', dec.strategy],
     ['input', '~' + dec.est_tokens + ' tok'],
+    ...(tok ? [['est. output', `~${tok.output.est_tokens_typical} tok (${tok.output.est_tokens_low}-${tok.output.est_tokens_high})`]] : []),
     ...(also.length ? [['also on', also.join(' + ')]] : []),
   ].map(([k, v]) => `${k} <b>${v}</b>`).join('');
 

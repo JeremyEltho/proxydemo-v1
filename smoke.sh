@@ -42,6 +42,17 @@ hey there, how are you?
 PROMPTS
 
 echo
+echo "== tokenomics estimate (educational, no tokens spent) =="
+post /api/tokenomics '{"prompt":"Write a Python function that reverses a linked list"}' \
+| python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+i, o = d["input"], d["output"]
+print("  %-10s input ~%d tok  ->  output ~%d tok (%d-%d)" % (
+    d["category"], i["est_tokens"], o["est_tokens_typical"], o["est_tokens_low"], o["est_tokens_high"]))
+'
+
+echo
 echo "== real completion through the router =="
 post /api/v1/chat/completions \
   '{"model":"auto","prompt":"Write a Python one-liner that sums a list of ints.","max_tokens":80}' \
