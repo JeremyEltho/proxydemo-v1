@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
 
+# Deploys are handled by Vercel's GitHub integration, which builds every push
+# and every PR on its own. This workflow only gates correctness.
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,38 +17,26 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements-dev.txt
-      # Engine tests are dependency-free; API tests need FastAPI.
-      - run: python test_router.py
-      - run: python test_api.py
 
-  deploy:
-    needs: test
-    runs-on: ubuntu-latest
-    # Secrets are unavailable to forked PRs, so only run where they exist.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    env:
-      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm install --global vercel@latest
+      - name: Engine tests (no dependencies)
+        run: python test_router.py
 
-      - name: Pull Vercel environment
-        run: vercel pull --yes --environment=${{ github.ref == 'refs/heads/main' && 'production' || 'preview' }} --token=${{ secrets.VERCEL_TOKEN }}
+      - name: API tests
+        run: python test_api.py
 
-      - name: Build
-        run: vercel build ${{ github.ref == 'refs/heads/main' && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }}
-
-      - name: Deploy
-        id: deploy
+      - name: Vercel entrypoint boots in routing-only mode
         run: |
-          url=$(vercel deploy --prebuilt ${{ github.ref == 'refs/heads/main' && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }})
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-          echo "Deployed to $url" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY'
+          import os
+          os.environ["ROUTER_OFFLINE"] = "1"
+          from api.index import app
+          from fastapi.testclient import TestClient
 
-      - name: Smoke test the deployment
-        run: |
-          curl -sf "${{ steps.deploy.outputs.url }}/api/health" | tee /dev/stderr | grep -q '"status"'
-          curl -sf -X POST "${{ steps.deploy.outputs.url }}/api/route" \
-            -H 'Content-Type: application/json' \
-            -d '{"prompt":"write a python function"}' | grep -q '"category": "code"'
+          c = TestClient(app)
+          health = c.get("/api/health").json()
+          assert health["mode"] == "cloud", health
+          route = c.post("/api/route", json={"prompt": "write a python function"}).json()
+          assert route["decision"]["category"] == "code", route
+          assert c.post("/api/v1/chat/completions", json={"prompt": "hi"}).status_code == 503
+          print("routing-only entrypoint OK ->", route["selected_model"])
+          PY
