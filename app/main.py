@@ -40,7 +40,7 @@ def require_content(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         raise HTTPException(422, "the prompt is empty; there is nothing to route")
     return cleaned
 
-from router import __version__
+from router import __version__, tokenomics
 from router.backends import BackendError, OllamaBackend
 from router.classifier import prompt_text
 from router.config import CATEGORIES, RouterConfig
@@ -117,6 +117,15 @@ def plan_for(body, hint: Optional[str], params: Optional[Dict[str, Any]] = None)
         raise HTTPException(exc.status, str(exc)) from exc
 
 
+def tokenomics_for(messages: List[Dict[str, Any]], plan) -> Dict[str, Any]:
+    return tokenomics.estimate(
+        prompt_text(messages),
+        category=plan.decision.category,
+        max_output_tokens=plan.options.get("num_predict"),
+        num_ctx=plan.options.get("num_ctx"),
+    ).to_dict()
+
+
 def require_backend() -> None:
     if ENGINE.cfg.offline:
         raise HTTPException(503, (
@@ -182,6 +191,25 @@ def route(body: RouteRequest, x_router_hint: Optional[str] = Header(None)) -> Di
         "prompt_preview": prompt_text(messages)[:200],
         "routing_ms": round((time.perf_counter() - started) * 1000, 2),
         "can_generate": not ENGINE.cfg.offline,
+        "tokenomics": tokenomics_for(messages, plan),
+    }
+
+
+@api.post("/tokenomics")
+def tokenomics_endpoint(body: ChatRequest, x_router_hint: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """Educational token estimate: input size, plus a forecast output range.
+
+    No generation happens here — see the `router/tokenomics.py` docstring for
+    what the numbers mean and why they are approximations, not measurements.
+    Accepts the same body as `/v1/chat/completions` (so `max_tokens` etc. feed
+    the forecast's ceiling), `stream` is simply ignored.
+    """
+    messages = body.as_messages()
+    plan = plan_for(body, x_router_hint, body.params())
+    return {
+        "selected_model": plan.model,
+        "mode": plan.mode,
+        **tokenomics_for(messages, plan),
     }
 
 
@@ -235,6 +263,9 @@ def chat_completions(body: ChatRequest, request: Request,
             "fallbacks_used": result["fallbacks"],
             "attempts": result["attempts"],
             "latency_ms": result["latency_ms"],
+            # Rides along so a caller can compare the forecast against the
+            # `usage` it is sitting next to, in one response.
+            "tokenomics": tokenomics_for(messages, plan),
         },
     }
 
@@ -258,7 +289,8 @@ def _sse(messages: List[Dict[str, Any]], plan):
     yield "data: " + json.dumps({
         **frame({"role": "assistant", "content": ""}),
         "router": {"mode": plan.mode, "decision": plan.decision.to_dict(),
-                   "selected_model": model, "fallback_chain": plan.chain[1:]},
+                   "selected_model": model, "fallback_chain": plan.chain[1:],
+                   "tokenomics": tokenomics_for(messages, plan)},
     }) + "\n\n"
 
     try:

@@ -327,6 +327,20 @@ class TestHTTPAPI(unittest.TestCase):
         self.assertEqual(body["decision"]["category"], "code")
         self.assertEqual(len(self.router.backend.calls), before)
 
+    def test_route_includes_a_tokenomics_estimate(self):
+        _, body, _ = self.post("/route", {"prompt": "fix this failing unit test in python"})
+        tok = body["tokenomics"]
+        self.assertEqual(tok["category"], "code")
+        self.assertGreater(tok["input"]["est_tokens"], 0)
+        self.assertGreater(tok["output"]["est_tokens_typical"], tok["output"]["est_tokens_low"] - 1)
+
+    def test_tokenomics_endpoint_does_not_generate(self):
+        before = len(self.router.backend.calls)
+        status, body, _ = self.post("/tokenomics", {"prompt": "hi", "max_tokens": 20})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.router.backend.calls), before)
+        self.assertLessEqual(body["output"]["est_tokens_high"], 20)
+
     def test_chat_completion_shape(self):
         status, body, headers = self.post("/v1/chat/completions", {
             "model": "auto", "messages": [{"role": "user", "content": "hey"}]})

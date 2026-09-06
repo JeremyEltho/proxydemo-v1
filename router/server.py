@@ -5,6 +5,7 @@
     GET  /routes                 the resolved route table
     GET  /stats                  per-model and per-category counters
     POST /route                  dry run: the decision, no generation
+    POST /tokenomics             educational input/output token estimate
     POST /v1/chat/completions    the real thing (set stream=true for SSE)
     POST /admin/reload           re-read config and re-resolve models
 """
@@ -18,6 +19,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Tuple
 
+from . import tokenomics
 from .backends import BackendError, OllamaBackend
 from .classifier import prompt_text
 from .config import CATEGORIES, RouterConfig
@@ -96,7 +98,7 @@ class Handler(BaseHTTPRequestHandler):
                 "classifier": router.cfg.classifier,
                 "categories": CATEGORIES,
                 "endpoints": ["/health", "/v1/models", "/routes", "/stats",
-                              "/route", "/v1/chat/completions", "/admin/reload"],
+                              "/route", "/tokenomics", "/v1/chat/completions", "/admin/reload"],
             }, 200 if health.get("reachable") else 503)
         elif path == "/v1/models":
             data = [{"id": "auto", "object": "model", "owned_by": "router",
@@ -117,6 +119,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path == "/route":
             self._handle_route()
+        elif path == "/tokenomics":
+            self._handle_tokenomics()
         elif path in ("/v1/chat/completions", "/chat/completions", "/v1/completions"):
             self._handle_completion()
         elif path == "/admin/reload":
@@ -141,6 +145,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return messages, plan
 
+    def _tokenomics(self, messages: list, plan: Any) -> Dict[str, Any]:
+        return tokenomics.estimate(
+            prompt_text(messages),
+            category=plan.decision.category,
+            max_output_tokens=plan.options.get("num_predict"),
+            num_ctx=plan.options.get("num_ctx"),
+        ).to_dict()
+
     def _handle_route(self) -> None:
         body = self._read_json()
         if body is None:
@@ -158,6 +170,26 @@ class Handler(BaseHTTPRequestHandler):
             "options": plan.options,
             "prompt_preview": prompt_text(messages)[:200],
             "routing_ms": round((time.time() - started) * 1000, 2),
+            "tokenomics": self._tokenomics(messages, plan),
+        })
+
+    def _handle_tokenomics(self) -> None:
+        """Educational token estimate: input size, plus a forecast output range.
+
+        No generation happens here — see `router/tokenomics.py` for what the
+        numbers mean and why they are approximations, not measurements.
+        """
+        body = self._read_json()
+        if body is None:
+            return
+        planned = self._plan(body)
+        if planned is None:
+            return
+        messages, plan = planned
+        self._send_json({
+            "selected_model": plan.model,
+            "mode": plan.mode,
+            **self._tokenomics(messages, plan),
         })
 
     def _handle_completion(self) -> None:
@@ -201,6 +233,9 @@ class Handler(BaseHTTPRequestHandler):
                 "fallbacks_used": result["fallbacks"],
                 "attempts": result["attempts"],
                 "latency_ms": result["latency_ms"],
+                # Rides along so a caller can compare the forecast against the
+                # `usage` it is sitting next to, in one response.
+                "tokenomics": self._tokenomics(messages, plan),
             },
         }, extra_headers={
             "X-Router-Category": plan.decision.category,
@@ -239,7 +274,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             emit({**frame({"role": "assistant", "content": ""}),
                   "router": {"mode": plan.mode, "decision": plan.decision.to_dict(),
-                             "selected_model": model}})
+                             "selected_model": model,
+                             "tokenomics": self._tokenomics(messages, plan)}})
             for chunk in chunks:
                 if chunk.get("done"):
                     emit({**frame({}, "stop"),

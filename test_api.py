@@ -87,6 +87,13 @@ class TestLocalMode(unittest.TestCase):
     def test_missing_prompt_is_422(self):
         self.assertEqual(self.client.post("/api/route", json={}).status_code, 422)
 
+    def test_route_includes_a_tokenomics_estimate(self):
+        body = self.client.post("/api/route", json={"prompt": "hey there"}).json()
+        tok = body["tokenomics"]
+        self.assertGreater(tok["input"]["est_tokens"], 0)
+        self.assertGreater(tok["output"]["est_tokens_typical"], 0)
+        self.assertEqual(tok["category"], "chat")
+
     def test_chat_completion(self):
         res = self.client.post("/api/v1/chat/completions", json={
             "model": "auto", "messages": [{"role": "user", "content": "hey"}]})
@@ -142,6 +149,46 @@ class TestLocalMode(unittest.TestCase):
         self.assertIn("Local Model Router", res.text)
 
 
+class TestTokenomicsEndpoint(unittest.TestCase):
+    """Educational input/output token estimate. Never generates."""
+
+    def setUp(self):
+        use_fake_backend()
+        self.client = TestClient(main.app)
+
+    def test_estimates_input_and_output(self):
+        body = self.client.post("/api/tokenomics", json={
+            "prompt": "write a python function that merges two sorted lists"}).json()
+        self.assertEqual(body["category"], "code")
+        self.assertGreater(body["input"]["est_tokens"], 0)
+        self.assertGreater(body["output"]["est_tokens_typical"], 0)
+        self.assertLessEqual(body["output"]["est_tokens_low"], body["output"]["est_tokens_typical"])
+        self.assertLessEqual(body["output"]["est_tokens_typical"], body["output"]["est_tokens_high"])
+        self.assertIn("disclaimer", body)
+        self.assertTrue(body["selected_model"])
+
+    def test_does_not_generate(self):
+        before = len(main.ENGINE.backend.calls)
+        self.client.post("/api/tokenomics", json={"prompt": "hi"})
+        self.assertEqual(len(main.ENGINE.backend.calls), before)
+
+    def test_respects_forced_category(self):
+        body = self.client.post("/api/tokenomics", json={
+            "prompt": "cut this down: " + "blah " * 40, "model": "summarize"}).json()
+        self.assertEqual(body["category"], "summarize")
+        self.assertLess(body["output"]["est_tokens_typical"], body["input"]["est_tokens"])
+
+    def test_max_tokens_caps_the_forecast(self):
+        body = self.client.post("/api/tokenomics", json={
+            "prompt": "write an essay about the history of computing " * 10,
+            "model": "reasoning", "max_tokens": 12}).json()
+        self.assertLessEqual(body["output"]["est_tokens_high"], 12)
+        self.assertEqual(body["output"]["capped_by"], "max_tokens=12")
+
+    def test_missing_prompt_is_422(self):
+        self.assertEqual(self.client.post("/api/tokenomics", json={}).status_code, 422)
+
+
 class TestCloudMode(unittest.TestCase):
     """What the Vercel deployment does: route, but never generate."""
 
@@ -164,6 +211,10 @@ class TestCloudMode(unittest.TestCase):
         res = self.client.post("/api/v1/chat/completions", json={"prompt": "hi"})
         self.assertEqual(res.status_code, 503)
         self.assertIn("locally", res.json()["detail"])
+
+    def test_tokenomics_works_without_a_runtime(self):
+        body = self.client.post("/api/tokenomics", json={"prompt": "hi"}).json()
+        self.assertGreater(body["input"]["est_tokens"], 0)
 
 
 class TestVercelEntrypoint(unittest.TestCase):

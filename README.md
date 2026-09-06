@@ -37,6 +37,7 @@ ollama pull qwen2.5:3b
 | `GET` | `/api/v1/models` | `auto`, every category, every installed model |
 | `GET` | `/api/stats` | Per-model requests, latency, tokens, fallbacks |
 | `POST` | `/api/route` | The routing decision only — no generation |
+| `POST` | `/api/tokenomics` | Educational input/output token estimate — no generation |
 | `POST` | `/api/v1/chat/completions` | OpenAI-compatible, `stream: true` supported |
 | `POST` | `/api/admin/reload` | Re-read config, re-detect installed models |
 
@@ -81,6 +82,27 @@ chosen model errors mid-request, the router tries the next one and reports the
 attempts in `router.attempts`. On a stream, fallback applies only before the
 first token — once bytes are on the wire the client is committed.
 
+**Tokenomics.** `POST /api/tokenomics` (and the `tokenomics` field carried by
+`/route` and by every completion's `router` block) estimates what a prompt
+costs *before* anything runs. Input size is a blend of `chars/4` and
+`words*1.3` — two familiar rules of thumb, averaged so both prose and dense
+code land close. Output size has no ground truth yet, so it is a
+`low`/`typical`/`high` forecast: a fixed base per category plus a share of the
+prompt, capped by `max_tokens`/`num_ctx` when either is set.
+
+The two terms matter. A purely proportional model collapses on generative
+work — "write a merge function" is a dozen tokens in and several hundred out,
+because the reply's length is set by the task, not by how long you spent
+asking — while a fixed size is just as wrong for `summarize`, where the reply
+really does scale with what you supplied. It is a classroom-grade
+approximation, not a tokenizer; `router/tokenomics.py` documents what it
+deliberately does not model.
+
+The UI puts the estimate and the measured `usage` on one shared scale, so the
+error is visible rather than asserted. Expect the measured prompt to run well
+above the estimate: `prompt_eval_count` counts the chat template the runtime
+wraps around your text, which the estimator never sees.
+
 ## Configuration
 
 Environment variables, or a `router.config.json` next to the app:
@@ -119,13 +141,15 @@ CI needs three repository secrets: `VERCEL_TOKEN`, `VERCEL_ORG_ID`,
 ## Tests
 
 ```bash
-python3 test_router.py     # engine: no dependencies at all
-python3 test_api.py        # FastAPI layer, needs requirements-dev.txt
+python3 test_router.py       # engine: no dependencies at all
+python3 test_tokenomics.py   # token estimator: no dependencies at all
+python3 test_api.py          # FastAPI layer, needs requirements-dev.txt
 ```
 
-53 tests covering classification, chain resolution, fallback behaviour,
-streaming, the OpenAI response shape, and both local and cloud modes. Neither
-suite talks to a real model — they run against a fake backend.
+85 tests covering classification, chain resolution, fallback behaviour,
+streaming, token estimation, the OpenAI response shape, and both local and
+cloud modes. None of the suites talk to a real model — they run against a
+fake backend.
 
 ## Layout
 
@@ -135,6 +159,7 @@ router/          the engine, standard library only
   classifier.py  heuristic + llm classifiers
   engine.py      planning, execution, fallback
   backends.py    Ollama client over urllib
+  tokenomics.py  educational input/output token estimator
   server.py      a stdlib-only server, if you want zero dependencies
 app/main.py      the FastAPI app
 api/index.py     Vercel entrypoint
