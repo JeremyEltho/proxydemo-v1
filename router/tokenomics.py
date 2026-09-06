@@ -15,13 +15,17 @@ count back (Ollama's `prompt_eval_count` / `eval_count`, surfaced as
                  people usually reach for, averaged so dense/code text and
                  loose prose both land in the right ballpark.
   output tokens  no model has run yet, so there is nothing to count. Instead
-                 this multiplies the input estimate by a per-category ratio
-                 (a chat reply is usually shorter than the question; a code
-                 request usually gets back more than it gave). The result is
-                 a low/typical/high spread, not a promise.
+                 each category carries a fixed base size plus a share of the
+                 prompt: a code request returns a function whether you asked
+                 in ten words or fifty, while a summary scales with the text
+                 you handed over. The result is a low/typical/high spread,
+                 not a promise.
 
 Treat every number here as "probably within a factor of 1.5-2x", not ground
-truth.
+truth. Two things it deliberately does not model: the chat template the
+runtime wraps around your prompt (which is why a measured `prompt_eval_count`
+comes in well above the input estimate), and how verbose one particular model
+happens to be.
 """
 
 from __future__ import annotations
@@ -36,24 +40,32 @@ _WORD = re.compile(r"\S+")
 CHARS_PER_TOKEN = 4.0
 TOKENS_PER_WORD = 1.3
 
-# Expected completion size as (low, typical, high) multiples of the input
-# token estimate. Wide on purpose — this tracks the shape of a category, not
-# any particular prompt.
-#   code       usually gets back more than it gave (the fix/implementation).
-#   math       often short (an answer plus brief working).
-#   reasoning  expands the most: comparisons and step-by-step explanations.
-#   summarize  by definition shrinks the input.
-#   long       long inputs get proportionally short summaries/answers back.
-#   chat       replies are usually close to the size of the message.
-OUTPUT_RATIO: Dict[str, Tuple[float, float, float]] = {
-    "code": (1.2, 2.5, 4.5),
-    "math": (0.3, 1.0, 2.0),
-    "reasoning": (1.0, 2.2, 4.0),
-    "summarize": (0.15, 0.35, 0.6),
-    "long": (0.1, 0.25, 0.5),
-    "chat": (0.4, 1.0, 2.0),
+# Expected completion size as (base, ratio) pairs — a fixed amount for the
+# kind of reply, plus a share of the prompt — given for low, typical and high.
+#
+# A pure ratio badly underestimates generative work: "write a merge function"
+# is a dozen tokens in and several hundred out, because the reply's length is
+# set by the task, not by how long you spent asking. A pure constant is just as
+# wrong for transformations, where the reply really does scale with what you
+# fed in. Splitting the two is what makes one table work for both.
+#
+#   code       a function plus explanation, largely independent of the ask.
+#   math       an answer with brief working.
+#   reasoning  expands the most: comparisons, step-by-step explanations.
+#   summarize  almost entirely proportional — it shrinks what you supplied.
+#   long       proportional and heavily compressed.
+#   chat       a short reply that grows a little with the message.
+Shape = Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]
+OUTPUT_SHAPE: Dict[str, Shape] = {
+    #             low          typical       high
+    "code":      ((60, 0.4), (180, 1.0), (480, 2.2)),
+    "math":      ((20, 0.2), (70, 0.6), (220, 1.4)),
+    "reasoning": ((80, 0.5), (220, 1.2), (560, 2.6)),
+    "summarize": ((8, 0.15), (20, 0.35), (60, 0.6)),
+    "long":      ((10, 0.05), (30, 0.12), (90, 0.3)),
+    "chat":      ((15, 0.3), (50, 0.8), (160, 1.8)),
 }
-DEFAULT_RATIO: Tuple[float, float, float] = (0.4, 1.0, 2.0)  # unknown category
+DEFAULT_SHAPE: Shape = ((15, 0.3), (50, 0.8), (160, 1.8))  # unknown category
 
 # A response has to start and stop somewhere; nothing gets estimated at zero.
 MIN_OUTPUT_TOKENS = 8
@@ -96,7 +108,9 @@ class TokenEstimate:
             },
             "est_total_tokens_typical": self.est_total_typical,
             "category": self.category,
-            "method": "heuristic: blended chars/4 and words*1.3, no real tokenizer",
+            "method": ("heuristic: input from blended chars/4 and words*1.3, "
+                       "output from a per-category base plus a share of the input; "
+                       "no real tokenizer"),
             "disclaimer": DISCLAIMER,
         }
 
@@ -125,10 +139,10 @@ def estimate(text: str, category: str = "chat",
     words = len(_WORD.findall(text))
     input_tokens = estimate_input_tokens(text)
 
-    low_r, typical_r, high_r = OUTPUT_RATIO.get(category, DEFAULT_RATIO)
-    low = max(MIN_OUTPUT_TOKENS, round(input_tokens * low_r))
-    typical = max(MIN_OUTPUT_TOKENS, round(input_tokens * typical_r))
-    high = max(MIN_OUTPUT_TOKENS, round(input_tokens * high_r))
+    low, typical, high = (
+        max(MIN_OUTPUT_TOKENS, round(base + ratio * input_tokens))
+        for base, ratio in OUTPUT_SHAPE.get(category, DEFAULT_SHAPE)
+    )
 
     capped_by = None
     if max_output_tokens and max_output_tokens > 0 and high > max_output_tokens:

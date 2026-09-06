@@ -40,12 +40,30 @@ class TestOutputForecast(unittest.TestCase):
         est = estimate(text, category="code")
         self.assertGreater(est.est_output_typical, est.est_input_tokens)
 
+    def test_short_generative_asks_still_forecast_a_real_reply(self):
+        """A dozen tokens of "write me a function" does not get a dozen back.
+
+        The regression this guards: a purely proportional model forecast ~30
+        tokens here, and a real run came back with 780.
+        """
+        est = estimate("write a python function that merges two sorted lists",
+                       category="code")
+        self.assertLess(est.est_input_tokens, 30)
+        self.assertGreater(est.est_output_typical, 150)
+        self.assertGreater(est.est_output_high, 400)
+
+    def test_transformations_still_scale_with_the_input(self):
+        """Summaries are the other half: the base must not swamp the ratio."""
+        small = estimate("summarize: " + "word " * 20, category="summarize")
+        large = estimate("summarize: " + "word " * 2000, category="summarize")
+        self.assertGreater(large.est_output_typical, small.est_output_typical * 10)
+
     def test_low_typical_high_are_ordered(self):
         est = estimate("explain the trade-offs of REST versus gRPC", category="reasoning")
         self.assertLessEqual(est.est_output_low, est.est_output_typical)
         self.assertLessEqual(est.est_output_typical, est.est_output_high)
 
-    def test_unknown_category_falls_back_to_default_ratio(self):
+    def test_unknown_category_falls_back_to_default_shape(self):
         known = estimate("hello", category="chat")
         unknown = estimate("hello", category="not-a-real-category")
         self.assertEqual(known.est_output_typical, unknown.est_output_typical)

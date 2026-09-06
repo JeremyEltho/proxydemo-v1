@@ -233,6 +233,9 @@ class Handler(BaseHTTPRequestHandler):
                 "fallbacks_used": result["fallbacks"],
                 "attempts": result["attempts"],
                 "latency_ms": result["latency_ms"],
+                # Rides along so a caller can compare the forecast against the
+                # `usage` it is sitting next to, in one response.
+                "tokenomics": self._tokenomics(messages, plan),
             },
         }, extra_headers={
             "X-Router-Category": plan.decision.category,
@@ -271,7 +274,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             emit({**frame({"role": "assistant", "content": ""}),
                   "router": {"mode": plan.mode, "decision": plan.decision.to_dict(),
-                             "selected_model": model}})
+                             "selected_model": model,
+                             "tokenomics": self._tokenomics(messages, plan)}})
             for chunk in chunks:
                 if chunk.get("done"):
                     emit({**frame({}, "stop"),

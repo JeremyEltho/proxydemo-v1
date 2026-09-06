@@ -179,6 +179,44 @@ select,input[type=text]{
 .why li{padding-left:15px;position:relative}
 .why li::before{content:"—";position:absolute;left:0;color:var(--ivory-faint)}
 
+/* ---- toll ticket ---------------------------------------------------- */
+/* One shared scale, mirrored about a brass datum: the prompt grows left,
+   the reply grows right, so expansion and shrinkage read as geometry. */
+.rail{display:grid;grid-template-columns:1fr 3px 1fr;height:26px;align-items:stretch}
+/* The engraving belongs to the faceplate, so it sits in the channel's own
+   background and the bars ride over it the way a needle rides a gauge. */
+.half{position:relative;overflow:hidden;border:1px solid #0d0a09;
+  background:repeating-linear-gradient(90deg,#120f0d 0 13px,#0d0a09 13px 14px);
+  box-shadow:0 2px 7px rgba(0,0,0,.5) inset}
+.half.in{border-right:none} .half.out{border-left:none}
+.datum{align-self:center;height:calc(100% + 8px);
+  background:linear-gradient(180deg,#e0bb3c,var(--brass-dim));
+  box-shadow:0 0 8px rgba(201,162,39,.5)}
+
+.fill,.band,.tick{position:absolute;top:0;bottom:0;
+  transition:width .45s cubic-bezier(.22,1,.36,1),left .45s cubic-bezier(.22,1,.36,1),
+             right .45s cubic-bezier(.22,1,.36,1)}
+.fill{right:0;width:0;background:var(--jacket,#c9a227)}
+/* The reply is a range, so it is drawn as a band and never as a hard edge. */
+.band{left:0;width:0;background:var(--jacket,#c9a227);opacity:.3}
+.tick{width:3px;margin-left:-1.5px;margin-right:-1.5px}
+.tick.typ{background:var(--jacket,#c9a227);box-shadow:0 0 7px var(--jacket,#c9a227)}
+.tick.act{background:var(--lamp);box-shadow:0 0 8px var(--lamp)}
+.tick.ceil{background:repeating-linear-gradient(180deg,var(--warn) 0 3px,transparent 3px 6px)}
+.tick.off{display:none}
+
+.figures{display:grid;grid-template-columns:1fr 1fr;margin-top:10px}
+.fig.in{text-align:right;padding-right:13px}
+.fig.out{padding-left:13px}
+.fig .n{font:400 21px/1 var(--data);color:var(--ivory)}
+.fig .n u{text-decoration:none;font-size:11px;color:var(--ivory-faint);margin-left:5px}
+.fig .sub{margin-top:6px;font:400 11.5px/1.45 var(--data);color:var(--ivory-dim)}
+.fig .sub s{text-decoration:none;font:500 10.5px var(--label);letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ivory-faint)}
+.fig .act{color:var(--lamp)}
+.ticket-note{margin:14px 0 0;font:400 12.5px/1.6 var(--body);color:var(--ivory-dim)}
+.ticket-note b{color:var(--warn);font-weight:400}
+
 /* ---- output -------------------------------------------------------- */
 .tape{
   white-space:pre-wrap;word-break:break-word;font:400 13px/1.65 var(--data);
@@ -246,6 +284,30 @@ select,input[type=text]{
         <div class="readout" id="readout"></div>
         <div class="meters" id="meters"></div>
         <ul class="why" id="why"></ul>
+      </section>
+
+      <section class="panel hidden" id="tollPanel">
+        <span class="stencil">Toll ticket<span class="rhs" id="tollState">before the call</span></span>
+        <div class="ticket" id="ticket">
+          <div class="rail">
+            <div class="half in">
+              <div class="fill" id="inFill"></div>
+              <div class="tick act off" id="inAct"></div>
+            </div>
+            <div class="datum"></div>
+            <div class="half out">
+              <div class="band" id="outBand"></div>
+              <div class="tick typ" id="outTyp"></div>
+              <div class="tick ceil off" id="outCeil"></div>
+              <div class="tick act off" id="outAct"></div>
+            </div>
+          </div>
+          <div class="figures">
+            <div class="fig in"><div class="n" id="inNum"></div><div class="sub" id="inSub"></div></div>
+            <div class="fig out"><div class="n" id="outNum"></div><div class="sub" id="outSub"></div></div>
+          </div>
+          <p class="ticket-note" id="tollNote"></p>
+        </div>
       </section>
 
       <section class="panel hidden" id="outPanel">
@@ -424,16 +486,14 @@ function render(d) {
   patchTo(cat, also);
 
   $('#stamp').textContent = d.routing_ms != null ? `decided in ${d.routing_ms} ms` : '';
-  const tok = d.tokenomics;
   $('#readout').innerHTML = [
     ['line', cat],
     ['model', d.selected_model],
     ['confidence', (dec.confidence * 100).toFixed(0) + '%'],
     ['read by', dec.strategy],
-    ['input', '~' + dec.est_tokens + ' tok'],
-    ...(tok ? [['est. output', `~${tok.output.est_tokens_typical} tok (${tok.output.est_tokens_low}-${tok.output.est_tokens_high})`]] : []),
     ...(also.length ? [['also on', also.join(' + ')]] : []),
   ].map(([k, v]) => `${k} <b>${v}</b>`).join('');
+  if (d.tokenomics) drawTicket(d.tokenomics, cat, null);
 
   const scores = dec.scores || {};
   const peak = Math.max(...Object.values(scores), 0);
@@ -452,6 +512,73 @@ function render(d) {
 
   const why = (dec.reasons || []).concat(dec.forced ? ['override: ' + dec.forced] : []);
   $('#why').innerHTML = why.map(r => `<li>${r.replace(/^[a-z]+: /, '')}</li>`).join('');
+}
+
+/* ---- the toll ticket ------------------------------------------------ */
+let ticket = null;          // last estimate drawn, so a completed call can reconcile
+const n = v => v.toLocaleString('en-US');
+
+// capped_by arrives as "max_tokens=512" / "num_ctx=4096".
+const CAP_WORDS = {max_tokens: 'the max_tokens on the request', num_ctx: 'the context window'};
+
+function drawTicket(tok, cat, actual) {
+  ticket = {tok, cat};
+  $('#tollPanel').classList.remove('hidden');
+  $('#ticket').style.setProperty('--jacket', jacket(cat));
+
+  const i = tok.input, o = tok.output;
+  const [capKey, capVal] = (o.capped_by || '').split('=');
+  const ceiling = Number(capVal) || 0;
+  // One scale across both halves, so the two sides can be compared by eye.
+  // The 5% headroom keeps a full-scale needle off the channel wall.
+  const max = 1.05 * Math.max(i.est_tokens, o.est_tokens_high, ceiling,
+                              actual ? actual.prompt_tokens : 0,
+                              actual ? actual.completion_tokens : 0, 1);
+  const pct = v => Math.min(100, v / max * 100) + '%';
+
+  $('#inFill').style.width = pct(i.est_tokens);
+  $('#outBand').style.left = pct(o.est_tokens_low);
+  $('#outBand').style.width = pct(o.est_tokens_high - o.est_tokens_low);
+  $('#outTyp').style.left = pct(o.est_tokens_typical);
+  $('#outCeil').style.left = pct(ceiling);
+  $('#outCeil').classList.toggle('off', !ceiling);
+
+  $('#inNum').innerHTML = `${n(i.est_tokens)}<u>tok</u>`;
+  $('#outNum').innerHTML = `~${n(o.est_tokens_typical)}<u>tok</u>`;
+  $('#inSub').innerHTML = `<s>prompt</s> ${n(i.chars)} characters`;
+  $('#outSub').innerHTML = `<s>reply</s> ${n(o.est_tokens_low)}–${n(o.est_tokens_high)}`;
+
+  ['#inAct', '#outAct'].forEach(id => $(id).classList.toggle('off', !actual));
+  if (actual) {
+    $('#inAct').style.right = pct(actual.prompt_tokens);
+    $('#outAct').style.left = pct(actual.completion_tokens);
+    $('#inSub').innerHTML += ` · <span class="act">${n(actual.prompt_tokens)} measured</span>`;
+    $('#outSub').innerHTML += ` · <span class="act">${n(actual.completion_tokens)} measured</span>`;
+  }
+
+  const cap = ceiling
+    ? ` It stops at ${n(ceiling)}, where ${CAP_WORDS[capKey] || o.capped_by} cuts the reply off.`
+    : '';
+  if (actual) {
+    $('#tollState').textContent = 'estimate and actual';
+    // Past ~3x a percentage stops being readable, so say it as a multiple.
+    const r = actual.completion_tokens / o.est_tokens_typical;
+    const miss = Math.abs(r - 1) < .05 ? 'within a few percent of the forecast'
+      : r > 3 ? `<b>${r.toFixed(1)}× the forecast</b>`
+      : `<b>${Math.round(Math.abs(r - 1) * 100)}% ${r > 1 ? 'over' : 'under'} the forecast</b>`;
+    // prompt_eval_count counts the templated prompt, the estimate counts the text
+    // you typed. Worth saying out loud — it is the usual reason the two disagree.
+    const overhead = actual.prompt_tokens > i.est_tokens * 1.5
+      ? ` The measured prompt is larger because it counts the model's chat template too, which the estimate never sees.`
+      : '';
+    $('#tollNote').innerHTML =
+      `The ${cat} line returned ${n(actual.completion_tokens)} tokens, ${miss}.${overhead}`;
+  } else {
+    $('#tollState').textContent = 'before the call';
+    $('#tollNote').textContent =
+      `Counted from length, then shaped by what the ${cat} line usually returns. `
+      + `The reply is a forecast, not a measurement.${cap}`;
+  }
 }
 
 async function refreshLog() {
@@ -502,7 +629,9 @@ async function run() {
     if (!body.stream) {
       const d = await res.json();
       tape.textContent = d.choices[0].message.content;
-      render({decision: d.router.decision, selected_model: d.router.selected_model, routing_ms: null});
+      render({decision: d.router.decision, selected_model: d.router.selected_model,
+              routing_ms: null, tokenomics: d.router.tokenomics});
+      if (d.router.tokenomics) drawTicket(d.router.tokenomics, d.router.decision.category, d.usage);
       $('#usage').textContent = `${d.model} · ${d.usage.total_tokens} tok · ${d.router.latency_ms} ms`;
     } else {
       const reader = res.body.getReader(), dec = new TextDecoder();
@@ -520,7 +649,8 @@ async function run() {
           if (ev.error) throw new Error(ev.error.message);
           if (ev.router) {
             model = ev.router.selected_model;
-            render({decision: ev.router.decision, selected_model: model, routing_ms: null});
+            render({decision: ev.router.decision, selected_model: model,
+                    routing_ms: null, tokenomics: ev.router.tokenomics});
           }
           text += ev.choices?.[0]?.delta?.content || '';
           if (ev.usage) usage = ev.usage;
@@ -528,6 +658,8 @@ async function run() {
         }
       }
       tape.textContent = text;
+      // The measured count only exists once the stream has closed.
+      if (usage && ticket) drawTicket(ticket.tok, ticket.cat, usage);
       $('#usage').textContent = `${model} · ${usage ? usage.total_tokens + ' tok · ' : ''}${(performance.now() - t0).toFixed(0)} ms`;
     }
   } catch (err) {

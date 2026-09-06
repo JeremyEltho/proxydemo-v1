@@ -82,16 +82,26 @@ chosen model errors mid-request, the router tries the next one and reports the
 attempts in `router.attempts`. On a stream, fallback applies only before the
 first token — once bytes are on the wire the client is committed.
 
-**Tokenomics.** `POST /api/tokenomics` (and the `tokenomics` field already
-included in every `/route` response) estimates how many tokens a prompt costs
-*before* anything runs. Input size is a blend of `chars/4` and `words*1.3` —
-two familiar rules of thumb, averaged so both prose and dense/code text land
-close. Output size has no ground truth yet, so it is a `low`/`typical`/`high`
-forecast built from a per-category ratio applied to the input estimate (a
-`summarize` reply tends to shrink the input, a `code` reply tends to grow it),
-capped by `max_tokens`/`num_ctx` when either is set. It is a classroom-grade
-approximation, not a tokenizer — see `router/tokenomics.py` for the full
-reasoning and caveats.
+**Tokenomics.** `POST /api/tokenomics` (and the `tokenomics` field carried by
+`/route` and by every completion's `router` block) estimates what a prompt
+costs *before* anything runs. Input size is a blend of `chars/4` and
+`words*1.3` — two familiar rules of thumb, averaged so both prose and dense
+code land close. Output size has no ground truth yet, so it is a
+`low`/`typical`/`high` forecast: a fixed base per category plus a share of the
+prompt, capped by `max_tokens`/`num_ctx` when either is set.
+
+The two terms matter. A purely proportional model collapses on generative
+work — "write a merge function" is a dozen tokens in and several hundred out,
+because the reply's length is set by the task, not by how long you spent
+asking — while a fixed size is just as wrong for `summarize`, where the reply
+really does scale with what you supplied. It is a classroom-grade
+approximation, not a tokenizer; `router/tokenomics.py` documents what it
+deliberately does not model.
+
+The UI puts the estimate and the measured `usage` on one shared scale, so the
+error is visible rather than asserted. Expect the measured prompt to run well
+above the estimate: `prompt_eval_count` counts the chat template the runtime
+wraps around your text, which the estimator never sees.
 
 ## Configuration
 
@@ -136,7 +146,7 @@ python3 test_tokenomics.py   # token estimator: no dependencies at all
 python3 test_api.py          # FastAPI layer, needs requirements-dev.txt
 ```
 
-83 tests covering classification, chain resolution, fallback behaviour,
+85 tests covering classification, chain resolution, fallback behaviour,
 streaming, token estimation, the OpenAI response shape, and both local and
 cloud modes. None of the suites talk to a real model — they run against a
 fake backend.
