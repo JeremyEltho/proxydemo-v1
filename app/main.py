@@ -122,6 +122,9 @@ def health() -> Dict[str, Any]:
         "mode": "cloud" if ENGINE.cfg.offline else "local",
         "backend": {"url": ENGINE.cfg.ollama_url, **backend},
         "classifier": ENGINE.cfg.classifier,
+        # Hybrid needs a runtime to escalate to; without one it is heuristic-only.
+        "escalation_available": bool(backend.get("reachable") and ENGINE.cfg.classifier_model),
+        "classifier_model": ENGINE.cfg.classifier_model,
         "categories": CATEGORIES,
     }
 

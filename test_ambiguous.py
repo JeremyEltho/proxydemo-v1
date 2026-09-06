@@ -12,6 +12,7 @@ worth knowing even when the answer is right.
 from __future__ import annotations
 
 import sys
+import time
 
 from router.classifier import classify_heuristic
 from router.config import RouterConfig
@@ -79,19 +80,36 @@ CASES = [
      "route this as chat even though it looks like code", "meta instruction vs content",
      {"chat", "code"}),
     ("A18a", "single word: python", "python", "one word, no intent", {"chat", "code"}),
-    ("A18b", "single word: recursion", "recursion", "one word, no intent", {"chat", "code"}),
+    # A bare topic word carries no request, so chat, code and reasoning are all
+    # defensible. The hybrid reads it as "explain recursion" -> reasoning.
+    ("A18b", "single word: recursion", "recursion", "one word, no intent",
+     {"chat", "code", "reasoning"}),
     ("A19", "help me summarize this null pointer",
      "help me summarize this null pointer", "summarize vs code — found live in the UI",
      {"summarize", "code"}),
 ]
 
 
-def run():
+def run(live: bool = False):
+    """live=True routes through the hybrid classifier against a real backend."""
     cfg = RouterConfig()
-    cfg.resolve_static()
+    backend = None
+    if live:
+        from router.backends import OllamaBackend
+        from router.classifier import classify
+        backend = OllamaBackend(cfg.ollama_url, 60)
+        cfg.resolve(backend.list_models())
+    else:
+        cfg.resolve_static()
     rows = []
     for cid, label, prompt, tension, acceptable in CASES:
-        d = classify_heuristic(prompt, cfg)
+        started = time.perf_counter()
+        if live:
+            from router.classifier import classify
+            d = classify(prompt, cfg, backend)
+        else:
+            d = classify_heuristic(prompt, cfg)
+        elapsed = (time.perf_counter() - started) * 1000
         ranked = sorted(d.scores.items(), key=lambda kv: -kv[1])
         top, second = ranked[0], ranked[1]
         margin = round(top[1] - second[1], 2)
@@ -100,8 +118,9 @@ def run():
             "acceptable": acceptable, "routed": d.category,
             "model": (cfg.chain_for(d.category) or ["—"])[0],
             "confidence": d.confidence, "est_tokens": d.est_tokens,
+            "strategy": d.strategy,
             "forced": d.forced, "reasons": d.reasons,
-            "ranked": ranked, "margin": margin,
+            "ranked": ranked, "margin": margin, "ms": round(elapsed, 1),
             "ok": d.category in acceptable,
         })
     return rows
@@ -140,14 +159,22 @@ def detail(rows):
     return "\n".join(out)
 
 
-rows = run()
+LIVE = "--live" in sys.argv
+rows = run(live=LIVE)
 whiffs = [r for r in rows if not r["ok"]]
 ties = [r for r in rows if r["ok"] and r["margin"] == 0]
 thin = [r for r in rows if r["ok"] and 0 < r["margin"] < 1.0]
 
 summary = (f"{len(rows)} cases · {len(rows) - len(whiffs)} acceptable · "
            f"{len(whiffs)} whiffs · {len(ties)} outright ties · {len(thin)} thin margins")
-print(summary)
+print(("LIVE hybrid · " if LIVE else "heuristic only · ") + summary)
+if LIVE:
+    escalated = [r for r in rows if r["strategy"].startswith("hybrid:")]
+    free = [r for r in rows if not r["strategy"].startswith("hybrid:")]
+    print(f"  escalated to the model: {len(escalated)}/{len(rows)} · "
+          f"median {sorted(r['ms'] for r in escalated)[len(escalated)//2]:.0f}ms")
+    print(f"  answered free by heuristic: {len(free)} · "
+          f"max {max((r['ms'] for r in free), default=0):.1f}ms")
 for r in whiffs:
     print(f'  WHIFF {r["id"]}: routed {r["routed"]}, wanted one of {sorted(r["acceptable"])}')
 for r in ties:

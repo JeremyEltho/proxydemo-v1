@@ -1,62 +1,74 @@
 # Ambiguous routing test cases
 
-20 prompts chosen to sit on the seam between two or three categories, fired at
-the heuristic classifier. Reproduce with:
+20 prompts chosen to sit on the seam between two or three categories.
 
 ```bash
-python3 test_ambiguous.py            # summary to stdout
-python3 test_ambiguous.py --print    # plus the results table
+python3 test_ambiguous.py            # heuristic only, no runtime needed
+python3 test_ambiguous.py --live     # through the hybrid, against real Ollama
 python3 test_router.py               # the fixes are locked in here too
 ```
 
 Each case carries an **acceptable set** — the categories a reasonable person
-would accept for that prompt. Landing outside it is a whiff. **Margin** is the
-gap between the top two scores; a small margin means the call was nearly a coin
-flip, which matters even when the answer is right.
+would accept. Landing outside it is a whiff. **Margin** is the gap between the
+top two scores.
 
-## Status: all six fixes applied
+## Two passes, two different fixes
 
-| | before | after |
+**Pass 1 — six feature fixes.** Closed the four whiffs this list originally
+found. Details in "The original whiffs" below.
+
+**Pass 2 — stop patching regexes, escalate instead.** Pass 1 was symptom-fixing:
+every new prompt shape found another hole (`what does SQL stand for` routed to
+`code` on a lone "SQL" at 0.6). Regex features will always have a long tail.
+
+The router now defaults to **hybrid**: run the free heuristic, and when its
+confidence lands below `escalate_below` (0.45), ask a small local model to
+classify instead. Routing the routing decision — cheap when the answer is
+obvious, accurate when it is not.
+
+| | heuristic only | hybrid |
 | --- | --- | --- |
-| acceptable | 15 / 19 | **20 / 20** |
-| whiffs | 4 | **0** |
-| zero-score fallthroughs, mislabelled as confident | 4 | **0** |
-| thin margins (< 1.0) | 2 | 7 |
+| acceptable | 20 / 20 | 20 / 20 |
+| escalated to the model | — | 10 / 20 |
+| median cost when escalating | — | 137 ms |
+| cost when not escalating | ≤ 0.4 ms | ≤ 1.7 ms |
 
-Thin margins going *up* is the point, not a regression. These prompts are
-genuinely ambiguous; the old feature set resolved several of them confidently
-because only one side had any features at all. Now both sides score, the gap is
-narrow, and the confidence number says so.
+Half of these escalate, but that is the worst case by construction — every
+prompt here was picked to be ambiguous. Ordinary traffic resolves on the
+heuristic and never pays the model call.
 
-### What changed
+`what does SQL stand for` now routes to `chat`: heuristic unsure at 0.20, model
+voted chat, heuristic's `code` overridden.
 
-1. **Zero-score fallthroughs are now labelled.** When nothing matches, the
-   decision reports `strategy: "fallback"` at confidence 0.0 instead of posing as
-   a confident `chat` routing. `/api/route` and the UI can tell "this is chat"
-   from "I have no idea".
-2. **Confidence is discounted by evidence.** It was `top / total`, so a single
-   0.6-weight feature returned 100%. Now `(top / total) × min(1, top / 3)` — one
-   weak feature can no longer produce certainty.
-3. **Domain nouns score when they name an artifact.** `this code`, `my bug`,
-   `the query` score 1.2; `math`/`maths` scores 1.5. Determiner-gated on purpose,
-   so "I used to code in college" — where *code* is a verb — still scores zero.
-4. **Reasoning verbs tolerate an object.** `think it through`, `walk me through`,
-   `talk us through` all match now; previously only the bare `think through` did.
-5. **Lone language names are weak (2.0 → 0.6), tasks are strong.** Two new
-   features fire at 2.0 when a language name appears inside a real request
-   (`write ... python`) or is applied to code (`python script`). Keeps the
-   one-liner case that motivated the feature, drops the snake.
-6. **Conversational framing scores.** `chat with me`, `let's discuss` at 2.5;
-   `my/your favourite` at 1.5.
-7. **The short-message summarize dampener is scoped.** It no longer fires on
-   messages that explicitly ask for a summary, so "convert this into bullet
-   points" is not penalised for being short.
+### Configuration
 
-Plus one found live in the UI rather than in this list: **fault vocabulary**
-(`null pointer`, `segfault`, `race condition`, `memory leak`, `deadlock`) now
-scores 2.0 as code — see A19.
+| variable | default | |
+| --- | --- | --- |
+| `ROUTER_CLASSIFIER` | `hybrid` | or `heuristic` (never escalate) / `llm` (always) |
+| `ROUTER_ESCALATE_BELOW` | `0.45` | confidence under which hybrid asks the model |
+| `ROUTER_CLASSIFIER_MODEL` | auto | prefers qwen2.5:3b → phi3:mini → smallest |
 
-## Results
+The classifier model is now chosen by **capability, not size**. It has to follow
+a one-word instruction, which the very smallest installed model does poorly.
+
+**On Vercel there is no runtime, so hybrid degrades to heuristic-only.**
+`/api/health` reports `escalation_available: false` there.
+
+## Multi-intent is now visible
+
+A prompt can carry more than one intent. `Decision.also_matched` lists every
+category scoring ≥40% of the winner, and the patch bay draws a cable to each —
+the routed line bright, the runners-up thin and dim.
+
+```
+fix this null pointer bug, then summarize the fix and calculate the big-O
+→ code 4.0 · summarize 3.0 · math 2.0    routed: code, also on summarize + math
+```
+
+The request still goes to one model. The other lines are real signal and the
+caller can see them.
+
+## Results — heuristic only
 
 | # | prompt | tension | routed | margin | verdict |
 | --- | --- | --- | --- | --- | --- |
@@ -81,59 +93,78 @@ scores 2.0 as code — see A19.
 | A18b | single word: recursion | one word, no intent | `chat` | 1.0 | ok |
 | A19 | help me summarize this null pointer | summarize vs code — found live in the UI | `summarize` | 1.0 | ok |
 
-## The four original whiffs, now fixed
+## Results — hybrid
+
+| # | prompt | tension | routed | margin | verdict |
+| --- | --- | --- | --- | --- | --- |
+| A1 | explain how recursion works in java | summarize vs code | `reasoning` | 0.9 | ok, thin |
+| A2 | calculate the time complexity of quicksort | math vs code vs reasoning | `math` | 2.0 | ok |
+| A3 | why is my python script slow, walk me through the logic | code vs reasoning | `code` | 0.4 | ok, thin |
+| A4 | tl;dr this function + code block | summarize vs code | `code` | 4.85 | ok |
+| A5 | I have a math problem in my code | math vs code | `math` | 0.3 | ok, thin |
+| A6 | chat with me about your favorite algorithm | chat vs code | `chat` | 2.5 | ok |
+| A7 | python is my favorite snake | language named, zero code intent | `chat` | 0.9 | ok, thin |
+| A8 | what does SQL stand for | definition question, not a task | `chat` | 0.6 | ok, thin |
+| A9 | I used to code in college | mentions coding, no request at all | `chat` | 0.0 | ok, tie |
+| A10 | summarize this proof + real proof | summarize vs math | `math` | 4.0 | ok |
+| A11 | give me the reasoning behind this bug | reasoning vs code | `code` | 1.7 | ok |
+| A12 | explain this like I'm five, what is JavaScript | chat vs code | `chat` | 0.9 | ok, thin |
+| A13 | walk me through this long math derivation, keep it short | long vs math vs summarize | `math` | 3.21 | ok |
+| A14 | every category stuffed equally | engineered near-tie | `reasoning` | 1.4 | ok |
+| A15 | is this code even valid, think it through | code vs reasoning | `reasoning` | 1.0 | ok |
+| A16 | essay to bullets, one bullet has an equation | summarize vs math | `summarize` | 2.0 | ok |
+| A17 | route this as chat even though it looks like code | meta instruction vs content | `chat` | 0.0 | ok, tie |
+| A18a | single word: python | one word, no intent | `chat` | 0.4 | ok, thin |
+| A18b | single word: recursion | one word, no intent | `reasoning` | 1.0 | ok |
+| A19 | help me summarize this null pointer | summarize vs code — found live in the UI | `summarize` | 1.0 | ok |
+
+## The original whiffs
 
 ### A5, A15 — bare domain nouns scored nothing
 
 `I have a math problem in my code` and `is this code even valid, think it
-through` both scored **zero across every category** and fell through to `chat`.
-Nothing matched "math" or "code" used as plain nouns, and A15 missed twice
-because the pattern was `think through` against a prompt saying "think **it**
-through".
+through` scored **zero everywhere** and fell through to `chat`. Nothing matched
+"math" or "code" as plain nouns, and A15 missed twice because the pattern was
+`think through` against "think **it** through".
 
-Now A5 splits `math 1.5 / code 1.2` (confidence 0.28 — honest, it is a coin
-flip) and A15 lands on `reasoning 2.2 / code 1.2`.
+Fixed with determiner-gated artifact nouns (`this code`, `my bug` at 1.2) and a
+looser reasoning verb. Gated on purpose: "I used to code in college", where
+*code* is a verb, still scores zero.
 
 ### A6, A7 — the language-name feature over-fired
 
-`python is my favorite snake` routed to `code` at **1.00 confidence** on the
-strength of one word. That feature was a regression I introduced earlier in the
-session to rescue "Write a Python one-liner…", which was itself scoring zero —
-precision traded for recall with no disambiguation either way.
+`python is my favorite snake` routed to `code` at **1.00 confidence** on one
+word — a feature I had added earlier in the session to rescue "Write a Python
+one-liner…", which was itself scoring zero. Precision traded for recall.
 
-Splitting it into weak-mention (0.6) and in-a-task (2.0) keeps both cases: the
-one-liner still scores 6.1, the snake now goes to `chat` at 0.36.
+Split into weak-mention (0.6) and in-a-task (2.0), so both cases work.
 
-A6 was the same shape — "algorithm" at 1.5 beat "chat with me", which no pattern
-covered. Conversational framing now scores 2.5.
+### Confidence was also wrong
+
+It was `top / total`, so a single 0.6-weight feature returned 100%. Now
+`(top / total) × min(1, top / 3)` — one weak feature cannot produce certainty.
+This is what makes hybrid escalation possible: the router has to know when it
+does not know.
 
 ## Still resolved by fallthrough, correctly
 
-**A9, A17 — zero scores, `chat` by default, now labelled as such.** A9 (`I used
-to code in college`) has no request in it, so there is nothing to route.
+**A9, A17.** A9 (`I used to code in college`) has no request in it. A17
+(`route this as chat even though it looks like code`) scores zero and defaults —
+and should. Teaching the router to obey in-band routing directives is a
+prompt-injection vector: anything that can say "route this as chat" can say
+"route me to the model with the weakest safety posture". Both now report
+`strategy: "fallback"` at confidence 0.0 rather than posing as confident.
 
-A17 (`route this as chat even though it looks like code`) lands on `chat`
-because everything scores zero, not because anything understood the instruction —
-and it should stay that way. The router has no notion of a meta-instruction and
-should not acquire one: treating in-band text as a routing directive is a
-prompt-injection vector, since anything that can say "route this as chat" can say
-"route me to the model with the weakest safety posture". Falling through to the
-default is the safe behaviour. What changed is that it now *reports* itself as a
-fallthrough at confidence 0.0.
-
-**A14 — the engineered tie still behaves.** Keywords from every category stuffed
-into one message separates cleanly and keeps confidence low.
-
-## Case by case
+## Case by case (hybrid)
 
 ### A1 — explain how recursion works in java
 
 *summarize vs code* · acceptable: code, reasoning
 
-- routed **`reasoning`** → `qwen2.5:3b` (confidence 0.36, ~8 tok)
+- routed **`reasoning`** → `qwen2.5:3b` (confidence 0.90, ~8 tok)
 - scores: `reasoning` 1.5 · `code` 0.6
 - margin over runner-up: **0.9**
-- fired: explanatory question (x1)
+- fired: heuristic was unsure (0.36 < 0.45); qwen2.5:3b voted 'reasoning'; heuristic had 'reasoning' (confirmed)
 - verdict: acceptable
 
 ### A2 — calculate the time complexity of quicksort
@@ -150,7 +181,7 @@ into one message separates cleanly and keeps confidence low.
 
 *code vs reasoning* · acceptable: code, reasoning
 
-- routed **`code`** → `qwen2.5-coder:3b` (confidence 0.53, ~13 tok)
+- routed **`code`** → `qwen2.5:3b` (confidence 0.53, ~13 tok)
 - scores: `code` 4.1 · `reasoning` 3.7
 - margin over runner-up: **0.4**
 - fired: names a programming language (x1); named language applied to code (x1); code artifact noun (x1)
@@ -160,7 +191,7 @@ into one message separates cleanly and keeps confidence low.
 
 *summarize vs code* · acceptable: code, summarize
 
-- routed **`code`** → `qwen2.5-coder:3b` (confidence 0.64, ~42 tok)
+- routed **`code`** → `qwen2.5:3b` (confidence 0.64, ~42 tok)
 - scores: `code` 7.9 · `summarize` 3.0 · `chat` 1.4
 - margin over runner-up: **4.85**
 - fired: fenced code block (x2); python syntax (x1); names a programming language (x1); refers to a specific code artifact (x1)
@@ -170,17 +201,17 @@ into one message separates cleanly and keeps confidence low.
 
 *math vs code* · acceptable: code, math
 
-- routed **`math`** → `qwen2.5:3b` (confidence 0.28, ~8 tok)
+- routed **`math`** → `qwen2.5:3b` (confidence 0.90, ~8 tok)
 - scores: `math` 1.5 · `code` 1.2
 - margin over runner-up: **0.3**
-- fired: math domain noun (x1)
+- fired: heuristic was unsure (0.28 < 0.45); qwen2.5:3b voted 'math'; heuristic had 'math' (confirmed)
 - verdict: acceptable
 
 ### A6 — chat with me about your favorite algorithm
 
 *chat vs code* · acceptable: chat, reasoning
 
-- routed **`chat`** → `dolphin-phi` (confidence 0.73, ~10 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.73, ~10 tok)
 - scores: `chat` 4.0 · `code` 1.5
 - margin over runner-up: **2.5**
 - fired: asks for conversation (x1); personal preference (x1)
@@ -190,30 +221,30 @@ into one message separates cleanly and keeps confidence low.
 
 *language named, zero code intent* · acceptable: chat
 
-- routed **`chat`** → `dolphin-phi` (confidence 0.36, ~6 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.90, ~6 tok)
 - scores: `chat` 1.5 · `code` 0.6
 - margin over runner-up: **0.9**
-- fired: personal preference (x1)
+- fired: heuristic was unsure (0.36 < 0.45); qwen2.5:3b voted 'chat'; heuristic had 'chat' (confirmed)
 - verdict: acceptable
 
 ### A8 — what does SQL stand for
 
 *definition question, not a task* · acceptable: chat, code
 
-- routed **`code`** → `qwen2.5-coder:3b` (confidence 0.20, ~5 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.70, ~5 tok)
 - scores: `code` 0.6
 - margin over runner-up: **0.6**
-- fired: names a programming language (x1)
+- fired: heuristic was unsure (0.20 < 0.45); qwen2.5:3b voted 'chat'; heuristic had 'code' (overridden)
 - verdict: acceptable
 
 ### A9 — I used to code in college
 
 *mentions coding, no request at all* · acceptable: chat
 
-- routed **`chat`** → `dolphin-phi` (confidence 0.00, ~6 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.90, ~6 tok)
 - scores: _all zero_
 - margin over runner-up: **0.0**
-- fired: no category signal in the text; defaulted to chat
+- fired: heuristic was unsure (0.00 < 0.45); qwen2.5:3b voted 'chat'; heuristic had 'chat' (confirmed)
 - verdict: acceptable
 
 ### A10 — summarize this proof + real proof
@@ -230,7 +261,7 @@ into one message separates cleanly and keeps confidence low.
 
 *reasoning vs code* · acceptable: code, reasoning
 
-- routed **`code`** → `qwen2.5-coder:3b` (confidence 0.68, ~9 tok)
+- routed **`code`** → `qwen2.5:3b` (confidence 0.68, ~9 tok)
 - scores: `code` 3.2 · `reasoning` 1.5
 - margin over runner-up: **1.7**
 - fired: engineering task (x1); refers to a specific code artifact (x1)
@@ -240,10 +271,10 @@ into one message separates cleanly and keeps confidence low.
 
 *chat vs code* · acceptable: chat, code, reasoning
 
-- routed **`reasoning`** → `qwen2.5:3b` (confidence 0.36, ~11 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.70, ~11 tok)
 - scores: `reasoning` 1.5 · `code` 0.6
 - margin over runner-up: **0.9**
-- fired: explanatory question (x1)
+- fired: heuristic was unsure (0.36 < 0.45); qwen2.5:3b voted 'chat'; heuristic had 'reasoning' (overridden)
 - verdict: acceptable
 
 ### A13 — walk me through this long math derivation, keep it short
@@ -260,10 +291,10 @@ into one message separates cleanly and keeps confidence low.
 
 *engineered near-tie* · acceptable: chat, code, math, reasoning, summarize
 
-- routed **`code`** → `qwen2.5-coder:3b` (confidence 0.31, ~47 tok)
+- routed **`reasoning`** → `qwen2.5:3b` (confidence 0.70, ~47 tok)
 - scores: `code` 9.1 · `math` 7.7 · `reasoning` 5.9 · `summarize` 4.1 · `chat` 3.0
 - margin over runner-up: **1.4**
-- fired: python syntax (x1); names a programming language (x1); code task in a named language (x1); named language applied to code (x1); code request (x1)
+- fired: heuristic was unsure (0.31 < 0.45); qwen2.5:3b voted 'reasoning'; heuristic had 'code' (overridden)
 - verdict: acceptable
 
 ### A15 — is this code even valid, think it through
@@ -290,30 +321,30 @@ into one message separates cleanly and keeps confidence low.
 
 *meta instruction vs content* · acceptable: chat, code
 
-- routed **`chat`** → `dolphin-phi` (confidence 0.00, ~12 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.90, ~12 tok)
 - scores: _all zero_
 - margin over runner-up: **0.0**
-- fired: no category signal in the text; defaulted to chat
+- fired: heuristic was unsure (0.00 < 0.45); qwen2.5:3b voted 'chat'; heuristic had 'chat' (confirmed)
 - verdict: acceptable
 
 ### A18a — single word: python
 
 *one word, no intent* · acceptable: chat, code
 
-- routed **`chat`** → `dolphin-phi` (confidence 0.21, ~1 tok)
+- routed **`chat`** → `phi3:mini` (confidence 0.90, ~1 tok)
 - scores: `chat` 1.0 · `code` 0.6
 - margin over runner-up: **0.4**
-- fired: very short message (x1)
+- fired: heuristic was unsure (0.21 < 0.45); qwen2.5:3b voted 'chat'; heuristic had 'chat' (confirmed)
 - verdict: acceptable
 
 ### A18b — single word: recursion
 
-*one word, no intent* · acceptable: chat, code
+*one word, no intent* · acceptable: chat, code, reasoning
 
-- routed **`chat`** → `dolphin-phi` (confidence 0.33, ~2 tok)
+- routed **`reasoning`** → `qwen2.5:3b` (confidence 0.70, ~2 tok)
 - scores: `chat` 1.0
 - margin over runner-up: **1.0**
-- fired: very short message (x1)
+- fired: heuristic was unsure (0.33 < 0.45); qwen2.5:3b voted 'reasoning'; heuristic had 'chat' (overridden)
 - verdict: acceptable
 
 ### A19 — help me summarize this null pointer

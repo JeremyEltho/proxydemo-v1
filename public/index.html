@@ -151,6 +151,10 @@ select,input[type=text]{
 }
 .line[data-live="1"]{background:linear-gradient(90deg,rgba(201,162,39,.09),transparent 78%);
   border-color:#3a322c}
+.line[data-live="2"] .jack{
+  background:radial-gradient(circle at 50% 50%,#0a0807 0 32%,var(--jacket,#c9a227) 33% 62%,#171310 63%);
+  box-shadow:0 0 0 1px #0c0a08;opacity:.5}
+.line[data-live="2"] .name{color:var(--ivory-dim)}
 .line .name{font:600 14px/1.1 var(--label);letter-spacing:.16em;text-transform:uppercase;
   color:var(--ivory-faint)}
 .line[data-live="1"] .name{color:var(--ivory)}
@@ -286,7 +290,7 @@ const SAMPLES = [
 
 let base = localStorage.getItem('routerBase') || '';
 let categories = [];
-let live = null;            // currently patched category
+let live = null;            // {primary, secondary:[…]} currently patched
 $('#base').value = base;
 $('#base').onchange = e => {
   base = e.target.value.trim().replace(/\/$/, '');
@@ -310,31 +314,27 @@ SAMPLES.forEach(([label, text]) => {
 const svg = $('#cables');
 const NS = 'http://www.w3.org/2000/svg';
 
-function patchTo(category) {
-  live = category;
-  document.querySelectorAll('.line').forEach(el =>
-    el.dataset.live = el.dataset.cat === category ? '1' : '0');
+function patchTo(primary, secondary = []) {
+  live = {primary, secondary};
+  document.querySelectorAll('.line').forEach(el => {
+    el.dataset.live = el.dataset.cat === primary ? '1'
+                    : secondary.includes(el.dataset.cat) ? '2' : '0';
+  });
   const out = $('#srcJack');
   out.dataset.live = '1';
-  out.style.setProperty('--jacket', jacket(category));
+  out.style.setProperty('--jacket', jacket(primary));
   drawCable();
 }
 
-function drawCable() {
-  svg.innerHTML = '';
-  if (!live || window.innerWidth <= 940) return;
-  const row = document.querySelector(`.line[data-cat="${live}"] .jack`);
-  const src = $('#srcJack');
-  if (!row || !src) return;
-
-  const rig = svg.getBoundingClientRect();
-  const a = src.getBoundingClientRect(), b = row.getBoundingClientRect();
-  const x1 = a.left - rig.left + a.width / 2, y1 = a.top - rig.top + a.height / 2;
+function runCable(cat, x1, y1, rig, {weight = 1, delay = 0} = {}) {
+  const row = document.querySelector(`.line[data-cat="${cat}"] .jack`);
+  if (!row) return;
+  const b = row.getBoundingClientRect();
   const x2 = b.left - rig.left + b.width / 2, y2 = b.top - rig.top + b.height / 2;
   const dx = x2 - x1;
   const sag = Math.min(96, Math.max(34, Math.hypot(dx, y2 - y1) * 0.34));
   const d = `M ${x1} ${y1} C ${x1 + dx * .38} ${y1 + sag}, ${x2 - dx * .38} ${y2 + sag}, ${x2} ${y2}`;
-  const color = jacket(live);
+  const color = jacket(cat);
 
   const line = (stroke, width, opacity) => {
     const p = document.createElementNS(NS, 'path');
@@ -343,15 +343,15 @@ function drawCable() {
     p.setAttribute('stroke-linecap', 'round'); p.setAttribute('opacity', opacity);
     svg.appendChild(p); return p;
   };
-  line('#0b0908', 8, .55);                 // shadow under the cable
-  const jkt = line(color, 4.5, 1);         // the jacket
-  const gloss = line('#ffffff', 1, .16);   // a highlight so it reads as round
+  line('#0b0908', 8 * weight, .55 * weight);
+  const jkt = line(color, 4.5 * weight, weight);
+  const gloss = line('#ffffff', 1, .16 * weight);
   gloss.setAttribute('transform', 'translate(0,-1.1)');
 
-  // connector shell at the bay end
   const shell = document.createElementNS(NS, 'circle');
-  shell.setAttribute('cx', x2); shell.setAttribute('cy', y2); shell.setAttribute('r', 3.4);
-  shell.setAttribute('fill', '#d8cdb4');
+  shell.setAttribute('cx', x2); shell.setAttribute('cy', y2);
+  shell.setAttribute('r', 3.4 * weight); shell.setAttribute('fill', '#d8cdb4');
+  shell.setAttribute('opacity', weight);
   svg.appendChild(shell);
 
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
@@ -360,9 +360,24 @@ function drawCable() {
     p.style.strokeDasharray = len;
     p.style.strokeDashoffset = len;
     p.getBoundingClientRect();            // force layout so the transition runs
-    p.style.transition = 'stroke-dashoffset .5s cubic-bezier(.3,1,.4,1)';
+    p.style.transition = `stroke-dashoffset .5s cubic-bezier(.3,1,.4,1) ${delay}ms`;
     p.style.strokeDashoffset = 0;
   });
+}
+
+function drawCable() {
+  svg.innerHTML = '';
+  if (!live || window.innerWidth <= 940) return;
+  const src = $('#srcJack');
+  if (!src) return;
+  const rig = svg.getBoundingClientRect();
+  const a = src.getBoundingClientRect();
+  const x1 = a.left - rig.left + a.width / 2, y1 = a.top - rig.top + a.height / 2;
+
+  // Runners-up first, thin and dim, so the routed line sits on top of them.
+  (live.secondary || []).forEach((cat, i) =>
+    runCable(cat, x1, y1, rig, {weight: 0.42, delay: 90 + i * 70}));
+  runCable(live.primary, x1, y1, rig, {weight: 1});
 }
 addEventListener('resize', drawCable);
 
@@ -405,7 +420,8 @@ async function boot() {
 function render(d) {
   $('#readingPanel').classList.remove('hidden');
   const dec = d.decision, cat = dec.category;
-  patchTo(cat);
+  const also = (dec.also_matched || []).map(m => m.category);
+  patchTo(cat, also);
 
   $('#stamp').textContent = d.routing_ms != null ? `decided in ${d.routing_ms} ms` : '';
   $('#readout').innerHTML = [
@@ -414,6 +430,7 @@ function render(d) {
     ['confidence', (dec.confidence * 100).toFixed(0) + '%'],
     ['read by', dec.strategy],
     ['input', '~' + dec.est_tokens + ' tok'],
+    ...(also.length ? [['also on', also.join(' + ')]] : []),
   ].map(([k, v]) => `${k} <b>${v}</b>`).join('');
 
   const scores = dec.scores || {};

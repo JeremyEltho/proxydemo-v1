@@ -182,10 +182,12 @@ class TestConfigResolution(unittest.TestCase):
         cfg.resolve(FAKE_MODELS)
         self.assertEqual(cfg.chain_for("code")[0], "dolphin-phi:latest")
 
-    def test_classifier_model_defaults_to_smallest(self):
+    def test_classifier_model_prefers_capability_over_size(self):
+        # Classifying means following a one-word instruction, which the very
+        # smallest model does poorly. dolphin-phi is smaller; qwen2.5:3b wins.
         cfg = RouterConfig()
         cfg.resolve(FAKE_MODELS)
-        self.assertEqual(cfg.classifier_model, "dolphin-phi:latest")
+        self.assertEqual(cfg.classifier_model, "qwen2.5:3b")
 
 
 class TestPlanning(unittest.TestCase):

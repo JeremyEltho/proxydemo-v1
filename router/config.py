@@ -42,9 +42,13 @@ class RouterConfig:
     ollama_url: str = "http://127.0.0.1:11434"
     host: str = "127.0.0.1"
     port: int = 8080
-    # "heuristic" (instant, no inference) or "llm" (a small local model votes).
-    classifier: str = "heuristic"
+    # "hybrid"    heuristic first, escalate to the model when it is unsure (default)
+    # "heuristic"  regex features only; instant, but has a long tail of misses
+    # "llm"        always ask the model
+    classifier: str = "hybrid"
     classifier_model: Optional[str] = None
+    # Hybrid escalates when heuristic confidence lands below this.
+    escalate_below: float = 0.45
     # Requests above this estimated token count are forced onto the "long" route.
     long_context_tokens: int = 1500
     request_timeout: int = 300
@@ -78,6 +82,7 @@ class RouterConfig:
         cfg.port = int(env("ROUTER_PORT", cfg.port))
         cfg.classifier = env("ROUTER_CLASSIFIER", cfg.classifier)
         cfg.classifier_model = env("ROUTER_CLASSIFIER_MODEL", cfg.classifier_model or "") or None
+        cfg.escalate_below = float(env("ROUTER_ESCALATE_BELOW", cfg.escalate_below))
         cfg.long_context_tokens = int(env("ROUTER_LONG_TOKENS", cfg.long_context_tokens))
         return cfg
 
@@ -106,8 +111,22 @@ class RouterConfig:
                 picked = list(smallest)
             self.resolved[category] = picked
 
-        if not self.classifier_model and smallest:
-            self.classifier_model = smallest[0]
+        if not self.classifier_model:
+            self.classifier_model = self._pick_classifier(names, smallest)
+
+    # Ordered preference for the model that does the classifying. It has to
+    # follow a one-word instruction, which the very smallest models do poorly.
+    CLASSIFIER_PREFERENCES = ["qwen2.5:3b", "qwen3.5:2b", "phi3:mini",
+                              "llama3.2:3b", "qwen2.5:7b", "dolphin-phi:latest"]
+
+    def _pick_classifier(self, names: List[str], smallest: List[str]) -> Optional[str]:
+        for want in self.CLASSIFIER_PREFERENCES:
+            if want in names:
+                return want
+            for name in names:
+                if name.split(":")[0] == want.split(":")[0]:
+                    return name
+        return smallest[0] if smallest else None
 
     def resolve_static(self) -> None:
         """Resolve without a backend: trust the declared chains, flag offline.
@@ -132,6 +151,7 @@ class RouterConfig:
             "offline": self.offline,
             "classifier": self.classifier,
             "classifier_model": self.classifier_model,
+            "escalate_below": self.escalate_below,
             "long_context_tokens": self.long_context_tokens,
             "routes": self.resolved or self.routes,
             "available_models": self.available,

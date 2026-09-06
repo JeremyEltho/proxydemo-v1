@@ -109,9 +109,26 @@ class Decision:
     est_tokens: int = 0
     forced: Optional[str] = None
 
+    def secondary(self, threshold: float = 0.4) -> List[Dict[str, Any]]:
+        """Other categories that also scored meaningfully.
+
+        A prompt can carry more than one intent ("fix this then summarize it").
+        The request still routes to one model, but the runners-up are real
+        signal and callers should be able to see them.
+        """
+        top = max(self.scores.values(), default=0.0)
+        if top <= 0:
+            return []
+        return [
+            {"category": c, "score": round(v, 2), "share": round(v / top, 2)}
+            for c, v in sorted(self.scores.items(), key=lambda kv: -kv[1])
+            if c != self.category and v > 0 and v / top >= threshold
+        ]
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "category": self.category,
+            "also_matched": self.secondary(),
             "confidence": round(self.confidence, 3),
             "strategy": self.strategy,
             "est_tokens": self.est_tokens,
@@ -191,50 +208,106 @@ def classify_heuristic(text: str, cfg: RouterConfig) -> Decision:
     return decision
 
 
-CLASSIFIER_PROMPT = (
-    "You are a request classifier. Reply with exactly one word from this list and "
-    "nothing else: code, math, reasoning, summarize, chat.\n\n"
-    "Rules: code = programming or debugging. math = calculation. "
-    "reasoning = analysis, comparison or planning. summarize = condensing or "
-    "rewriting supplied text. chat = greetings and casual conversation.\n\n"
-    "Request:\n{text}\n\nOne word:"
-)
+CLASSIFIER_PROMPT = """You label a request with exactly one category. Answer with the single word and nothing else.
+
+code       writing, fixing, reviewing or explaining software
+math       a calculation or a mathematical result
+reasoning  analysis, comparison, planning, or a "why does this happen" question
+summarize  condensing, rewriting or reformatting text the user supplied
+chat       greetings, small talk, opinions, and simple factual or definition questions
+
+Examples:
+"fix this traceback in my parser" -> code
+"what does SQL stand for" -> chat
+"what is 12% of 340" -> math
+"should we use postgres or sqlite for this" -> reasoning
+"cut this email down to three lines" -> summarize
+"python is my favorite snake" -> chat
+"walk me through why my query is slow" -> reasoning
+
+Request:
+{text}
+
+Category:"""
+
+VOTABLE = [c for c in CATEGORIES if c != "long"]
 
 
-def classify_llm(text: str, cfg: RouterConfig, backend) -> Decision:
-    """Let a small local model vote, falling back to the heuristic on any doubt."""
-    fallback = classify_heuristic(text, cfg)
-    if fallback.forced:  # size override wins regardless of the vote
-        return fallback
-
-    excerpt = text[:1200]
+def _llm_vote(text: str, cfg: RouterConfig, backend) -> Tuple[Optional[str], str]:
+    """Ask the small model for one word. Returns (category or None, note)."""
     try:
         result = backend.chat(
             model=cfg.classifier_model,
-            messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(text=excerpt)}],
+            messages=[{"role": "user", "content": CLASSIFIER_PROMPT.format(text=text[:1500])}],
             options={"temperature": 0.0, "num_predict": 5},
         )
         raw = (result.get("content") or "").strip().lower()
-    except Exception as exc:  # backend down, model missing, timeout
-        fallback.reasons.append(f"llm classifier unavailable ({exc.__class__.__name__}), used heuristic")
-        return fallback
+    except Exception as exc:
+        return None, f"{cfg.classifier_model} unavailable ({exc.__class__.__name__})"
 
-    word = re.sub(r"[^a-z]", "", raw.split()[0]) if raw.split() else ""
-    if word not in CATEGORIES or word == "long":
-        fallback.reasons.append(f"llm classifier returned unusable {raw!r}, used heuristic")
-        return fallback
+    if not raw:
+        return None, f"{cfg.classifier_model} returned nothing"
+    word = re.sub(r"[^a-z]", "", raw.split()[0])
+    if word not in VOTABLE:
+        return None, f"{cfg.classifier_model} returned unusable {raw[:30]!r}"
+    return word, f"{cfg.classifier_model} voted {word!r}"
 
+
+def classify_llm(text: str, cfg: RouterConfig, backend) -> Decision:
+    """Always ask the model, falling back to the heuristic if it cannot answer."""
+    base = classify_heuristic(text, cfg)
+    if base.forced:  # a size override outranks any vote
+        return base
+
+    vote, note = _llm_vote(text, cfg, backend)
+    if vote is None:
+        base.reasons = [f"chat: {note}, used heuristic"] + base.reasons
+        return base
+
+    agrees = vote == base.category
     return Decision(
-        category=word,
-        scores=fallback.scores,
-        reasons=[f"{cfg.classifier_model} voted {word!r}", f"heuristic agreed: {word == fallback.category}"],
-        confidence=1.0 if word == fallback.category else 0.7,
+        category=vote,
+        scores=base.scores,
+        reasons=[note, f"heuristic said {base.category!r} ({'agrees' if agrees else 'overridden'})"],
+        confidence=0.95 if agrees else 0.7,
         strategy=f"llm:{cfg.classifier_model}",
-        est_tokens=fallback.est_tokens,
+        est_tokens=base.est_tokens,
     )
 
 
 def classify(text: str, cfg: RouterConfig, backend=None) -> Decision:
-    if cfg.classifier == "llm" and backend is not None and cfg.classifier_model:
+    """Route the routing decision itself.
+
+    hybrid (the default) runs the free heuristic and only spends a model call
+    when the heuristic is not confident — which is exactly the long tail the
+    regex features keep missing. Obvious prompts still cost ~0ms.
+    """
+    has_model = backend is not None and bool(cfg.classifier_model)
+
+    if cfg.classifier == "llm" and has_model:
         return classify_llm(text, cfg, backend)
-    return classify_heuristic(text, cfg)
+
+    decision = classify_heuristic(text, cfg)
+    if cfg.classifier != "hybrid" or not has_model:
+        return decision
+    if decision.forced or decision.confidence >= cfg.escalate_below:
+        return decision
+
+    vote, note = _llm_vote(text, cfg, backend)
+    if vote is None:
+        decision.reasons = decision.reasons + [f"{decision.category}: escalated, but {note}"]
+        return decision
+
+    agrees = vote == decision.category
+    return Decision(
+        category=vote,
+        scores=decision.scores,
+        reasons=[
+            f"heuristic was unsure ({decision.confidence:.2f} < {cfg.escalate_below})",
+            note,
+            f"heuristic had {decision.category!r} ({'confirmed' if agrees else 'overridden'})",
+        ],
+        confidence=0.9 if agrees else 0.7,
+        strategy=f"hybrid:{cfg.classifier_model}",
+        est_tokens=decision.est_tokens,
+    )
