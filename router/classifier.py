@@ -85,6 +85,9 @@ FEATURES: Dict[str, List[Feature]] = {
            2.8, "asks to be taken through it"),
         _f(r"\b(plan|strategy|architect|design|decide|recommend)\b", 1.8, "planning request"),
         _f(r"\b(if .{0,40} then|implication|consequence|because)\b", 1.2, "causal language"),
+        _f(r"\b(all|some|no|every|any)\s+\w+\s+(are|is|were)\s+\w+", 2.2, "quantified statement"),
+        _f(r"\b(therefore|thus|it follows|implies|contradiction|valid|premise|conclusion)\b",
+           1.8, "logical vocabulary"),
     ],
     "summarize": [
         _f(r"\b(summari[sz]e|summary|tl;?dr|condense|abstract)\b", 3.0, "summarization verb"),
@@ -100,8 +103,11 @@ FEATURES: Dict[str, List[Feature]] = {
         _f(r"\b(chat|talk|speak)\s+(with|to)\s+(me|us)\b|\blet'?s\s+(chat|talk|discuss)\b",
            2.5, "asks for conversation"),
         _f(r"\b(my|your)\s+favou?rite\b", 1.5, "personal preference"),
-        _f(r"\b(like i'?m five|eli5|in simple terms|in plain english|dumb it down)\b",
+        _f(r"\b(like i'?m five|like i am five|eli5|in simple terms|in plain english|dumb it down)\b",
            3.0, "asks for a casual explanation"),
+        _f(r"\bwhat\s+(does|do)\b[^.!?]{0,40}\b(stand for|mean|refer to)\b|"
+           r"\bwhat\s+is\s+(an?\s+)?acronym\b",
+           2.5, "definition question"),
         _f(r"^\s*\S{1,40}\s*[?.!]?\s*$", 1.0, "very short message"),
     ],
 }
