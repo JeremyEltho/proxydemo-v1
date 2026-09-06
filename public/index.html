@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Model Router</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@400;500;600;700&family=Saira:wght@300;400;500&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  /* Aged switchboard: bakelite panel, brass hardware, ivory silkscreen. */
+  --bay:#191512; --panel:#221d19; --panel-hi:#2b2521; --panel-lo:#14100e;
+  --edge:#3a322c; --edge-hi:#4d423a;
+  --ivory:#e9e2d2; --ivory-dim:#a49a86; --ivory-faint:#6f6656;
+  --brass:#c9a227; --brass-dim:#7d661a;
+  --lamp:#6fd0a8; --lamp-off:#2d3a35; --warn:#d98a3a;
+  --fault:#c4614f;
+  /* Cable jacket colours, one per line. */
+  --code:#5b7fb4; --math:#b0524b; --reasoning:#c9a227;
+  --summarize:#4a7c6f; --long:#a8683a; --chat:#8f8879; --pinned:#8a6fa8;
+
+  --label:"Saira Condensed","Arial Narrow",sans-serif;
+  --body:"Saira",system-ui,sans-serif;
+  --data:"Courier Prime",ui-monospace,Menlo,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bay);color:var(--ivory);
+  font:400 15px/1.5 var(--body);
+  background-image:
+    linear-gradient(180deg,#1d1815 0%,#191512 42%,#151110 100%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.045'/%3E%3C/svg%3E");
+}
+.shell{max-width:1240px;margin:0 auto;padding:26px 24px 72px}
+
+/* ---- engraved nameplate ------------------------------------------- */
+.plate{
+  position:relative;display:flex;align-items:center;gap:20px;flex-wrap:wrap;
+  padding:15px 26px;margin-bottom:22px;
+  background:linear-gradient(180deg,var(--panel-hi),var(--panel-lo));
+  border:1px solid var(--edge);border-top-color:var(--edge-hi);border-radius:3px;
+  box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 6px 20px rgba(0,0,0,.45);
+}
+.plate::before,.plate::after{
+  content:"";position:absolute;top:50%;width:9px;height:9px;margin-top:-4.5px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#6a5c4c,#2a2320 70%);
+  box-shadow:0 1px 1px rgba(0,0,0,.6),0 0 0 1px #0f0c0a;
+}
+.plate::before{left:9px} .plate::after{right:9px}
+.plate h1{
+  margin:0;font:700 27px/1 var(--label);letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ivory);text-shadow:0 1px 0 #000,0 -1px 0 rgba(255,255,255,.06);
+}
+.plate .serial{font:400 11px/1 var(--data);color:var(--ivory-faint);letter-spacing:.1em}
+.spacer{flex:1}
+
+/* lamps */
+.lamp{display:inline-flex;align-items:center;gap:8px;font:600 11px/1 var(--label);
+  letter-spacing:.16em;text-transform:uppercase;color:var(--ivory-dim)}
+.bulb{width:9px;height:9px;border-radius:50%;background:var(--lamp-off);
+  box-shadow:0 0 0 1px #0d0b09 inset}
+.lamp.on .bulb{background:var(--lamp);box-shadow:0 0 8px var(--lamp),0 0 0 1px #0d0b09 inset}
+.lamp.on{color:var(--ivory)}
+.lamp.idle .bulb{background:var(--warn);box-shadow:0 0 8px rgba(217,138,58,.6),0 0 0 1px #0d0b09 inset}
+.lamp.idle{color:var(--warn)}
+
+/* ---- panels -------------------------------------------------------- */
+.panel{
+  position:relative;
+  background:linear-gradient(180deg,var(--panel) 0%,#1c1815 100%);
+  border:1px solid var(--edge);border-top-color:var(--edge-hi);border-radius:3px;
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 4px 14px rgba(0,0,0,.4);
+  padding:16px 18px 18px;
+}
+.panel + .panel{margin-top:18px}
+.stencil{
+  display:block;margin:0 0 14px;font:600 11px/1 var(--label);
+  letter-spacing:.22em;text-transform:uppercase;color:var(--ivory-faint);
+}
+.stencil .rhs{float:right;letter-spacing:.08em;color:var(--ivory-dim);font-family:var(--data);
+  font-size:11px;text-transform:none}
+
+.rig{position:relative;display:grid;grid-template-columns:1fr 396px;gap:30px;align-items:start}
+#cables{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible}
+
+/* ---- incoming ------------------------------------------------------ */
+textarea{
+  width:100%;min-height:112px;resize:vertical;display:block;
+  background:#120f0d;color:var(--ivory);border:1px solid #0d0a09;border-radius:2px;
+  padding:12px 13px;font:400 14px/1.6 var(--data);
+  box-shadow:0 2px 8px rgba(0,0,0,.5) inset;
+}
+textarea::placeholder{color:var(--ivory-faint)}
+:focus-visible{outline:2px solid var(--brass);outline-offset:2px}
+
+.keys{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}
+.key{
+  cursor:pointer;font:500 11px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;
+  padding:7px 12px;color:var(--ivory-dim);background:linear-gradient(180deg,#2a2420,#1e1a17);
+  border:1px solid var(--edge);border-top-color:var(--edge-hi);border-radius:2px;
+  box-shadow:0 2px 0 #100d0b;transition:transform .08s,color .12s;
+}
+.key:hover{color:var(--ivory)}
+.key:active{transform:translateY(2px);box-shadow:none}
+
+.controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px}
+button.throw{
+  cursor:pointer;font:700 12px/1 var(--label);letter-spacing:.18em;text-transform:uppercase;
+  padding:12px 20px;color:#17120a;border-radius:2px;border:1px solid #8f7418;
+  background:linear-gradient(180deg,#e0bb3c,var(--brass));
+  box-shadow:0 3px 0 #6d5813,0 5px 10px rgba(0,0,0,.4);
+  transition:transform .08s;
+}
+button.throw.ghost{
+  color:var(--ivory);background:linear-gradient(180deg,#2f2823,#211d19);
+  border-color:var(--edge);box-shadow:0 3px 0 #100d0b;
+}
+button.throw:active:not(:disabled){transform:translateY(3px);box-shadow:0 0 0 #6d5813}
+button.throw:disabled{opacity:.4;cursor:not-allowed}
+select,input[type=text]{
+  background:#120f0d;color:var(--ivory);border:1px solid #0d0a09;border-radius:2px;
+  padding:9px 10px;font:400 12px var(--data);
+}
+.toggle{display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+  font:500 11px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--ivory-dim)}
+.toggle input{accent-color:var(--brass)}
+
+/* ---- patch bay ----------------------------------------------------- */
+.bay-rows{display:flex;flex-direction:column;gap:2px}
+.line{
+  position:relative;display:grid;grid-template-columns:26px 1fr auto;gap:11px;align-items:center;
+  padding:9px 10px 9px 6px;border-radius:2px;border:1px solid transparent;
+  transition:background .18s,border-color .18s;
+}
+.line + .line{border-top:1px solid #191412}
+.jack{
+  width:19px;height:19px;border-radius:50%;justify-self:center;
+  background:radial-gradient(circle at 50% 50%,#0a0807 0 32%,#3a322c 33% 62%,#171310 63%);
+  box-shadow:0 0 0 1px #0c0a08,0 1px 0 rgba(255,255,255,.05);
+}
+.jack.out{position:absolute;right:-11px;top:46px;z-index:6;
+  box-shadow:0 0 0 1px #0c0a08,0 2px 5px rgba(0,0,0,.6)}
+.jack.out[data-live="1"]{
+  background:radial-gradient(circle at 50% 50%,#0a0807 0 32%,var(--jacket,#c9a227) 33% 62%,#171310 63%);
+  box-shadow:0 0 10px -1px var(--jacket,#c9a227),0 0 0 1px #0c0a08;}
+.line[data-live="1"] .jack{
+  background:radial-gradient(circle at 50% 50%,#0a0807 0 32%,var(--jacket,#c9a227) 33% 62%,#171310 63%);
+  box-shadow:0 0 10px -1px var(--jacket,#c9a227),0 0 0 1px #0c0a08;
+}
+.line[data-live="1"]{background:linear-gradient(90deg,rgba(201,162,39,.09),transparent 78%);
+  border-color:#3a322c}
+.line .name{font:600 14px/1.1 var(--label);letter-spacing:.16em;text-transform:uppercase;
+  color:var(--ivory-faint)}
+.line[data-live="1"] .name{color:var(--ivory)}
+.line .dest{font:400 12px/1.35 var(--data);color:var(--ivory-dim);text-align:right;
+  min-width:0;overflow:hidden}
+.line .standby{display:block;font-size:10.5px;color:var(--ivory-faint);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---- reading (meters) ---------------------------------------------- */
+.readout{display:flex;flex-wrap:wrap;gap:6px 18px;margin-bottom:14px;
+  font:400 12px var(--data);color:var(--ivory-dim)}
+.readout b{color:var(--ivory);font-weight:400}
+.meters{display:grid;gap:6px}
+.meter{display:grid;grid-template-columns:74px 1fr 34px;gap:11px;align-items:center;
+  font:500 10.5px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;color:var(--ivory-faint)}
+.scale{position:relative;height:9px;background:#120f0d;border:1px solid #0d0a09;overflow:hidden}
+.scale::after{content:"";position:absolute;inset:0;
+  background:repeating-linear-gradient(90deg,transparent 0 13px,rgba(0,0,0,.55) 13px 14px)}
+.needle{height:100%;width:0;transition:width .4s cubic-bezier(.22,1,.36,1)}
+.meter .val{font-family:var(--data);letter-spacing:0;text-align:right;color:var(--ivory-dim)}
+.why{margin:13px 0 0;padding:0;list-style:none;font:400 12.5px/1.6 var(--body);color:var(--ivory-dim)}
+.why li{padding-left:15px;position:relative}
+.why li::before{content:"—";position:absolute;left:0;color:var(--ivory-faint)}
+
+/* ---- output -------------------------------------------------------- */
+.tape{
+  white-space:pre-wrap;word-break:break-word;font:400 13px/1.65 var(--data);
+  background:#120f0d;border:1px solid #0d0a09;padding:14px;min-height:74px;
+  max-height:420px;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,.5) inset;color:var(--ivory);
+}
+.tape.empty{color:var(--ivory-faint)}
+.caret{display:inline-block;width:8px;height:14px;background:var(--brass);vertical-align:-2px;
+  animation:pulse 1.05s steps(2) infinite}
+@keyframes pulse{to{opacity:0}}
+
+/* ---- traffic ------------------------------------------------------- */
+.log{width:100%;border-collapse:collapse;font:400 12px var(--data)}
+.log td{padding:6px 2px;border-bottom:1px solid #191412;vertical-align:top;color:var(--ivory-dim)}
+.log tr:last-child td{border-bottom:none}
+.log td.k{color:var(--ivory-faint);width:96px;font-family:var(--label);font-weight:500;
+  letter-spacing:.13em;text-transform:uppercase;font-size:11px}
+
+.fault{display:none;margin-top:13px;padding:11px 13px;border:1px solid #5a2f28;
+  background:#241512;color:#e8b0a5;font:400 13px/1.5 var(--body);border-radius:2px}
+.fault.up{display:block}
+.hidden{display:none}
+.foot{margin-top:24px;font:400 12px/1.7 var(--body);color:var(--ivory-faint)}
+.foot code{font-family:var(--data);color:var(--brass-dim)}
+
+@media (max-width:940px){
+  .rig{grid-template-columns:1fr}
+  #cables{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.01ms !important;transition-duration:.01ms !important}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <div class="plate">
+    <h1>Local Model Router</h1>
+    <span class="serial">MDL-01</span>
+    <span class="spacer"></span>
+    <span class="lamp" id="lampMode"><span class="bulb"></span><span id="modeText">connecting</span></span>
+    <span class="lamp" id="lampBay"><span class="bulb"></span><span id="bayText">bay</span></span>
+    <input type="text" id="base" size="14" placeholder="api base">
+  </div>
+
+  <div class="rig">
+    <div>
+      <section class="panel">
+        <span class="stencil">Incoming</span>
+        <textarea id="prompt" spellcheck="false">Write a Python function that merges two sorted lists.</textarea>
+        <div class="keys" id="keys"></div>
+        <div class="controls">
+          <button class="throw" id="go">Route it</button>
+          <button class="throw ghost" id="run">Route and run</button>
+          <select id="force" aria-label="Force a line"><option value="auto">auto — classify</option></select>
+          <label class="toggle"><input type="checkbox" id="stream" checked> stream</label>
+        </div>
+        <div class="fault" id="fault"></div>
+        <span class="jack out" id="srcJack" aria-hidden="true"></span>
+      </section>
+
+      <section class="panel hidden" id="readingPanel">
+        <span class="stencil">Reading<span class="rhs" id="stamp"></span></span>
+        <div class="readout" id="readout"></div>
+        <div class="meters" id="meters"></div>
+        <ul class="why" id="why"></ul>
+      </section>
+
+      <section class="panel hidden" id="outPanel">
+        <span class="stencil">Line output<span class="rhs" id="usage"></span></span>
+        <div class="tape" id="tape"></div>
+      </section>
+    </div>
+
+    <div>
+      <section class="panel">
+        <span class="stencil">Patch bay</span>
+        <div class="bay-rows" id="bay"></div>
+      </section>
+      <section class="panel">
+        <span class="stencil">Traffic</span>
+        <table class="log" id="log"><tr><td class="k">idle</td><td>Nothing routed yet.</td></tr></table>
+      </section>
+    </div>
+
+    <svg id="cables" aria-hidden="true"></svg>
+  </div>
+
+  <p class="foot">
+    Ask for a decision with <code>POST /api/route</code>. Run one with
+    <code>POST /api/v1/chat/completions</code> — OpenAI-compatible, so any client that
+    speaks it can point here and get a local model.
+  </p>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const jacket = c => getComputedStyle(document.documentElement).getPropertyValue('--' + c).trim() || '#c9a227';
+
+const SAMPLES = [
+  ['code',      'Fix this traceback: KeyError when I import my config module'],
+  ['math',      'Calculate 17 * 43 + 12 and show the steps'],
+  ['reasoning', 'Compare the trade-offs of REST versus gRPC for our service'],
+  ['summarize', 'Summarize the following article into three bullet points: ' + 'lorem ipsum dolor sit amet consectetur. '.repeat(10)],
+  ['chat',      'hey, how are you doing today?'],
+  ['long',      'Review this transcript and flag the risks: ' + 'the meeting covered budget, staffing and the migration timeline. '.repeat(120)],
+];
+
+let base = localStorage.getItem('routerBase') || '';
+let categories = [];
+let live = null;            // currently patched category
+$('#base').value = base;
+$('#base').onchange = e => {
+  base = e.target.value.trim().replace(/\/$/, '');
+  localStorage.setItem('routerBase', base);
+  boot();
+};
+
+const api = p => (base || '') + '/api' + p;
+const fault = m => { $('#fault').textContent = m; $('#fault').classList.add('up'); };
+const clearFault = () => $('#fault').classList.remove('up');
+
+/* ---- sample keys ---------------------------------------------------- */
+SAMPLES.forEach(([label, text]) => {
+  const b = document.createElement('button');
+  b.className = 'key'; b.type = 'button'; b.textContent = label;
+  b.onclick = () => { $('#prompt').value = text; route(); };
+  $('#keys').appendChild(b);
+});
+
+/* ---- the patch cable ------------------------------------------------ */
+const svg = $('#cables');
+const NS = 'http://www.w3.org/2000/svg';
+
+function patchTo(category) {
+  live = category;
+  document.querySelectorAll('.line').forEach(el =>
+    el.dataset.live = el.dataset.cat === category ? '1' : '0');
+  const out = $('#srcJack');
+  out.dataset.live = '1';
+  out.style.setProperty('--jacket', jacket(category));
+  drawCable();
+}
+
+function drawCable() {
+  svg.innerHTML = '';
+  if (!live || window.innerWidth <= 940) return;
+  const row = document.querySelector(`.line[data-cat="${live}"] .jack`);
+  const src = $('#srcJack');
+  if (!row || !src) return;
+
+  const rig = svg.getBoundingClientRect();
+  const a = src.getBoundingClientRect(), b = row.getBoundingClientRect();
+  const x1 = a.left - rig.left + a.width / 2, y1 = a.top - rig.top + a.height / 2;
+  const x2 = b.left - rig.left + b.width / 2, y2 = b.top - rig.top + b.height / 2;
+  const dx = x2 - x1;
+  const sag = Math.min(96, Math.max(34, Math.hypot(dx, y2 - y1) * 0.34));
+  const d = `M ${x1} ${y1} C ${x1 + dx * .38} ${y1 + sag}, ${x2 - dx * .38} ${y2 + sag}, ${x2} ${y2}`;
+  const color = jacket(live);
+
+  const line = (stroke, width, opacity) => {
+    const p = document.createElementNS(NS, 'path');
+    p.setAttribute('d', d); p.setAttribute('fill', 'none');
+    p.setAttribute('stroke', stroke); p.setAttribute('stroke-width', width);
+    p.setAttribute('stroke-linecap', 'round'); p.setAttribute('opacity', opacity);
+    svg.appendChild(p); return p;
+  };
+  line('#0b0908', 8, .55);                 // shadow under the cable
+  const jkt = line(color, 4.5, 1);         // the jacket
+  const gloss = line('#ffffff', 1, .16);   // a highlight so it reads as round
+  gloss.setAttribute('transform', 'translate(0,-1.1)');
+
+  // connector shell at the bay end
+  const shell = document.createElementNS(NS, 'circle');
+  shell.setAttribute('cx', x2); shell.setAttribute('cy', y2); shell.setAttribute('r', 3.4);
+  shell.setAttribute('fill', '#d8cdb4');
+  svg.appendChild(shell);
+
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  [jkt, gloss].forEach(p => {
+    const len = p.getTotalLength();
+    p.style.strokeDasharray = len;
+    p.style.strokeDashoffset = len;
+    p.getBoundingClientRect();            // force layout so the transition runs
+    p.style.transition = 'stroke-dashoffset .5s cubic-bezier(.3,1,.4,1)';
+    p.style.strokeDashoffset = 0;
+  });
+}
+addEventListener('resize', drawCable);
+
+/* ---- boot ----------------------------------------------------------- */
+async function boot() {
+  try {
+    const h = await (await fetch(api('/health'))).json();
+    categories = h.categories;
+    const local = h.mode === 'local';
+    $('#lampMode').className = 'lamp ' + (local ? 'on' : 'idle');
+    $('#modeText').textContent = local ? 'line live' : 'routing only';
+    $('#lampBay').className = 'lamp on';
+    $('#bayText').textContent = h.backend.reachable
+      ? `${h.backend.model_count} models · ${h.classifier}` : 'no runtime';
+    $('#run').disabled = !local;
+    $('#run').title = local ? '' : 'Generation needs a model runtime on this host';
+
+    const sel = $('#force');
+    sel.innerHTML = '<option value="auto">auto — classify</option>';
+    categories.forEach(c => sel.add(new Option('force ' + c, c)));
+
+    const r = await (await fetch(api('/routes'))).json();
+    $('#bay').innerHTML = Object.entries(r.routes).map(([c, e]) => `
+      <div class="line" data-cat="${c}" data-live="0" style="--jacket:${jacket(c)}">
+        <span class="jack"></span>
+        <span class="name">${c}</span>
+        <span class="dest">${e.model || '—'}
+          ${e.fallbacks.length ? `<span class="standby">standby ${e.fallbacks.join(' · ')}</span>` : ''}
+        </span>
+      </div>`).join('');
+    if (live) patchTo(live);
+  } catch (err) {
+    $('#lampMode').className = 'lamp idle';
+    $('#modeText').textContent = 'no answer';
+    fault(`No answer from ${base || location.origin}. Start the router with ./run.sh, or set the API base above.`);
+  }
+}
+
+/* ---- rendering a decision ------------------------------------------- */
+function render(d) {
+  $('#readingPanel').classList.remove('hidden');
+  const dec = d.decision, cat = dec.category;
+  patchTo(cat);
+
+  $('#stamp').textContent = d.routing_ms != null ? `decided in ${d.routing_ms} ms` : '';
+  $('#readout').innerHTML = [
+    ['line', cat],
+    ['model', d.selected_model],
+    ['confidence', (dec.confidence * 100).toFixed(0) + '%'],
+    ['read by', dec.strategy],
+    ['input', '~' + dec.est_tokens + ' tok'],
+  ].map(([k, v]) => `${k} <b>${v}</b>`).join('');
+
+  const scores = dec.scores || {};
+  const peak = Math.max(...Object.values(scores), 0);
+  // A size override or an explicit line skips scoring: an all-zero meter bank
+  // would read as broken, so say why it is empty instead of showing it.
+  if (peak === 0) {
+    $('#meters').innerHTML =
+      '<p class="why" style="margin:0">Meters idle — this line was set directly, not read from the text.</p>';
+  } else {
+  const max = peak;
+  $('#meters').innerHTML = Object.entries(scores).map(([c, v]) => `
+    <div class="meter"><span${v > 0 ? ` style="color:${jacket(c)}"` : ''}>${c}</span>
+      <div class="scale"><div class="needle" style="width:${(v / max * 100).toFixed(1)}%;background:${jacket(c)}"></div></div>
+      <span class="val">${v.toFixed(1)}</span></div>`).join('');
+  }
+
+  const why = (dec.reasons || []).concat(dec.forced ? ['override: ' + dec.forced] : []);
+  $('#why').innerHTML = why.map(r => `<li>${r.replace(/^[a-z]+: /, '')}</li>`).join('');
+}
+
+async function refreshLog() {
+  try {
+    const s = await (await fetch(api('/stats'))).json();
+    const rows = Object.entries(s.by_model).map(([m, e]) =>
+      `<tr><td class="k">${m}</td><td>${e.requests} sent · ${e.avg_latency_ms} ms avg · ${e.completion_tokens} tok out</td></tr>`);
+    $('#log').innerHTML = rows.length
+      ? `<tr><td class="k">totals</td><td>${s.requests} routed · ${s.fallbacks} fell back · ${s.errors} faults</td></tr>` + rows.join('')
+      : '<tr><td class="k">idle</td><td>Nothing routed yet.</td></tr>';
+  } catch {}
+}
+
+const payload = () => ({model: $('#force').value, prompt: $('#prompt').value});
+
+async function route() {
+  clearFault(); $('#go').disabled = true;
+  try {
+    const res = await fetch(api('/route'), {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload())});
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    render(d);
+  } catch (err) { fault(err.message); }
+  finally { $('#go').disabled = false; }
+}
+
+async function run() {
+  clearFault(); $('#run').disabled = true;
+  $('#outPanel').classList.remove('hidden');
+  const tape = $('#tape');
+  tape.classList.remove('empty');
+  tape.innerHTML = '<span class="caret"></span>';
+  $('#usage').textContent = '';
+  const t0 = performance.now();
+
+  const paint = text => {
+    tape.textContent = text;
+    tape.appendChild(Object.assign(document.createElement('span'), {className: 'caret'}));
+  };
+
+  try {
+    const body = {...payload(), stream: $('#stream').checked};
+    const res = await fetch(api('/v1/chat/completions'), {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+
+    if (!body.stream) {
+      const d = await res.json();
+      tape.textContent = d.choices[0].message.content;
+      render({decision: d.router.decision, selected_model: d.router.selected_model, routing_ms: null});
+      $('#usage').textContent = `${d.model} · ${d.usage.total_tokens} tok · ${d.router.latency_ms} ms`;
+    } else {
+      const reader = res.body.getReader(), dec = new TextDecoder();
+      let buf = '', text = '', model = '', usage = null;
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream: true});
+        const parts = buf.split('\n\n'); buf = parts.pop();
+        for (const part of parts) {
+          if (!part.startsWith('data: ')) continue;
+          const raw = part.slice(6);
+          if (raw === '[DONE]') continue;
+          const ev = JSON.parse(raw);
+          if (ev.error) throw new Error(ev.error.message);
+          if (ev.router) {
+            model = ev.router.selected_model;
+            render({decision: ev.router.decision, selected_model: model, routing_ms: null});
+          }
+          text += ev.choices?.[0]?.delta?.content || '';
+          if (ev.usage) usage = ev.usage;
+          paint(text);
+        }
+      }
+      tape.textContent = text;
+      $('#usage').textContent = `${model} · ${usage ? usage.total_tokens + ' tok · ' : ''}${(performance.now() - t0).toFixed(0)} ms`;
+    }
+  } catch (err) {
+    tape.classList.add('empty');
+    tape.textContent = 'Nothing came back.';
+    fault(err.message);
+  } finally { $('#run').disabled = false; refreshLog(); }
+}
+
+$('#go').onclick = route;
+$('#run').onclick = run;
+$('#prompt').addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') run();
+});
+
+boot().then(route);
+</script>
+</body>
+</html>
