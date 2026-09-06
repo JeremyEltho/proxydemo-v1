@@ -374,7 +374,7 @@ async function boot() {
     const local = h.mode === 'local';
     $('#lampMode').className = 'lamp ' + (local ? 'on' : 'idle');
     $('#modeText').textContent = local ? 'line live' : 'routing only';
-    $('#lampBay').className = 'lamp on';
+    $('#lampBay').className = 'lamp ' + (h.backend.reachable ? 'on' : 'idle');
     $('#bayText').textContent = h.backend.reachable
       ? `${h.backend.model_count} models · ${h.classifier}` : 'no runtime';
     $('#run').disabled = !local;
