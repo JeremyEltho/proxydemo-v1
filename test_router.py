@@ -109,6 +109,63 @@ class TestClassifier(unittest.TestCase):
         json.dumps(classify_heuristic("hello", self.cfg).to_dict())
 
 
+class TestAmbiguityFixes(unittest.TestCase):
+    """Locks in the six fixes from testcases.md so they cannot silently regress."""
+
+    def setUp(self):
+        self.cfg = RouterConfig()
+
+    def decide(self, text):
+        return classify_heuristic(text, self.cfg)
+
+    def test_zero_score_is_reported_as_a_fallthrough(self):
+        # A default is not a classification; callers must be able to tell.
+        d = self.decide("I used to code in college")
+        self.assertEqual(d.category, "chat")
+        self.assertEqual(d.strategy, "fallback")
+        self.assertEqual(d.confidence, 0.0)
+
+    def test_domain_nouns_score_when_they_name_an_artifact(self):
+        d = self.decide("I have a math problem in my code")
+        self.assertIn(d.category, {"math", "code"})
+        self.assertGreater(d.scores["math"], 0)
+        self.assertGreater(d.scores["code"], 0)
+
+    def test_bare_code_as_a_verb_does_not_score(self):
+        # "my code" is an artifact; "used to code" is a verb.
+        self.assertEqual(self.decide("I used to code in college").scores["code"], 0)
+        self.assertGreater(self.decide("there is a bug in my code").scores["code"], 0)
+
+    def test_reasoning_verbs_tolerate_an_object(self):
+        for text in ("is this code even valid, think it through",
+                     "walk me through the logic here"):
+            self.assertGreater(self.decide(text).scores["reasoning"], 0, text)
+
+    def test_lone_language_name_is_weak(self):
+        # Fixes "python is my favorite snake" without losing the real request.
+        self.assertEqual(self.decide("python is my favorite snake").category, "chat")
+        self.assertEqual(self.decide("Write a Python one-liner that sums a list").category, "code")
+
+    def test_conversational_framing_beats_a_topical_noun(self):
+        self.assertEqual(self.decide("chat with me about your favorite algorithm").category, "chat")
+
+    def test_short_explicit_summarize_escapes_the_dampener(self):
+        d = self.decide("convert this essay into bullet points, one bullet has an equation")
+        self.assertEqual(d.category, "summarize")
+
+    def test_fault_vocabulary_scores_as_code(self):
+        # Found live in the UI: this used to score zero for code.
+        d = self.decide("help me summarize this null pointer")
+        self.assertEqual(d.category, "summarize")
+        self.assertGreater(d.scores["code"], 0, "null pointer should register as code")
+
+    def test_confidence_is_discounted_when_evidence_is_thin(self):
+        thin = self.decide("python is my favorite snake")
+        strong = self.decide("Write a Python function that merges two sorted lists")
+        self.assertLess(thin.confidence, 0.5)
+        self.assertGreater(strong.confidence, 0.9)
+
+
 class TestConfigResolution(unittest.TestCase):
     def test_unavailable_preferences_are_skipped(self):
         cfg = RouterConfig()
